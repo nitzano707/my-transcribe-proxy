@@ -8,11 +8,12 @@ app = FastAPI()
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+# כתובת הבסיס (שנה לפי הדומיין שלך ברנדר)
+BASE_URL = "https://my-transcribe-proxy.onrender.com"
+
 
 def delete_later(path, delay=3600):
-    """
-    מוחק את הקובץ אחרי delay שניות (ברירת מחדל: שעה)
-    """
+    """מוחק את הקובץ אוטומטית אחרי delay שניות (ברירת מחדל: שעה)."""
     def _delete():
         time.sleep(delay)
         if os.path.exists(path):
@@ -23,43 +24,48 @@ def delete_later(path, delay=3600):
 
 @app.get("/ping")
 async def ping():
-    """
-    נתיב קל לבדיקה מ-UptimeRobot כדי לשמור את השרת ער
-    """
+    """בדיקת חיים עבור UptimeRobot או לבדיקה ידנית."""
     return {"status": "ok"}
 
 
 @app.post("/upload")
 async def upload_file(request: Request, file: UploadFile = File(None)):
     """
-    מקבל קובץ אודיו (לא משנה באיזה שם שדה נשלח),
-    שומר זמנית, ומחזיר URL ציבורי.
+    מקבל קובץ אודיו מכל סוג של בקשה:
+    - form-data (עם שדה בשם file / key / upload)
+    - binary (raw)
+    שומר זמנית ומחזיר URL ציבורי לגישה לקובץ.
     """
     try:
-        # אם לא נשלח שדה בשם 'file', ננסה למצוא כל קובץ אחר
-        if file is None:
-            form = await request.form()
-            if len(form) > 0:
-                # לוקח את הקובץ הראשון שנשלח בטופס
-                first_value = list(form.values())[0]
-                if isinstance(first_value, UploadFile):
-                    file = first_value
-                else:
-                    return JSONResponse({"error": "לא התקבל קובץ תקין."}, status_code=400)
-            else:
-                return JSONResponse({"error": "לא התקבל קובץ."}, status_code=400)
+        filename = None
+        content = None
 
-        # שמירה זמנית של הקובץ
-        file_path = os.path.join(UPLOAD_DIR, file.filename)
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        # --- מצב 1: אם נשלח כ-form-data ---
+        if file:
+            filename = file.filename
+            content = await file.read()
 
-        # הפעלת טיימר למחיקה אוטומטית
+        # --- מצב 2: אם לא נשלח כ-form-data, נבדוק אם זה binary/raw ---
+        else:
+            body = await request.body()
+            if body:
+                filename = f"upload_{int(time.time())}.bin"
+                content = body
+
+        # --- אם לא התקבל בכלל תוכן ---
+        if not content:
+            return JSONResponse({"error": "לא התקבל קובץ תקין."}, status_code=400)
+
+        # שמירת הקובץ בתיקייה
+        file_path = os.path.join(UPLOAD_DIR, filename)
+        with open(file_path, "wb") as f:
+            f.write(content)
+
+        # מחיקה אוטומטית אחרי שעה
         delete_later(file_path)
 
-        # יצירת URL ציבורי
-        base_url = "https://my-transcribe-proxy.onrender.com"
-        file_url = f"{base_url}/files/{file.filename}"
+        # יצירת קישור ציבורי
+        file_url = f"{BASE_URL}/files/{filename}"
 
         return JSONResponse({
             "url": file_url,
@@ -72,9 +78,7 @@ async def upload_file(request: Request, file: UploadFile = File(None)):
 
 @app.get("/files/{filename}")
 async def get_file(filename: str):
-    """
-    מציג או מחזיר את הקובץ לפי שם.
-    """
+    """מאפשר להוריד או לצפות בקובץ לפי שם."""
     file_path = os.path.join(UPLOAD_DIR, filename)
     if os.path.exists(file_path):
         return FileResponse(file_path)
