@@ -4,12 +4,14 @@ import os, shutil, threading, time
 
 app = FastAPI()
 
+# ───────────────────────────────────────────────
 # תיקייה זמנית לשמירת קבצים
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # כתובת הבסיס (שנה לפי הדומיין שלך ברנדר)
 BASE_URL = "https://my-transcribe-proxy.onrender.com"
+# ───────────────────────────────────────────────
 
 
 def delete_later(path, delay=3600):
@@ -22,10 +24,16 @@ def delete_later(path, delay=3600):
     threading.Thread(target=_delete, daemon=True).start()
 
 
-@app.get("/ping")
+# ───────────────────────────────────────────────
+# פינג ל-UptimeRobot או לבדיקה ידנית
+@app.api_route("/ping", methods=["GET", "HEAD"])
 async def ping():
-    """בדיקת חיים עבור UptimeRobot או לבדיקה ידנית."""
-    return {"status": "ok"}
+    """
+    מחזיר תשובה פשוטה כדי לשמור את השרת ער.
+    תומך גם ב-HEAD (כי UptimeRobot שולח HEAD כברירת מחדל)
+    """
+    return JSONResponse({"status": "ok"})
+# ───────────────────────────────────────────────
 
 
 @app.post("/upload")
@@ -76,6 +84,7 @@ async def upload_file(request: Request, file: UploadFile = File(None)):
         return JSONResponse({"error": f"שגיאה בעת העלאת הקובץ: {str(e)}"}, status_code=500)
 
 
+# ───────────────────────────────────────────────
 @app.get("/files/{filename}")
 async def get_file(filename: str):
     """מאפשר להוריד או לצפות בקובץ לפי שם."""
@@ -86,3 +95,4 @@ async def get_file(filename: str):
         return JSONResponse({
             "error": "הקובץ נמחק או לא נמצא (ייתכן שחלפה שעה מאז ההעלאה)."
         }, status_code=404)
+# ───────────────────────────────────────────────
