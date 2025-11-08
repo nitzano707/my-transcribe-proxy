@@ -1,6 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.responses import JSONResponse, FileResponse
 import os, shutil, threading, time
+from urllib.parse import quote, unquote
 
 app = FastAPI()
 
@@ -72,8 +73,11 @@ async def upload_file(request: Request, file: UploadFile = File(None)):
         # מחיקה אוטומטית אחרי שעה
         delete_later(file_path)
 
-        # יצירת קישור ציבורי
-        file_url = f"{BASE_URL}/files/{filename}"
+        # קידוד שם הקובץ ל-URL תקין (תומך בעברית, רווחים ותווים מיוחדים)
+        encoded_filename = quote(filename)
+
+        # יצירת קישור ציבורי תקין
+        file_url = f"{BASE_URL}/files/{encoded_filename}"
 
         return JSONResponse({
             "url": file_url,
@@ -88,7 +92,10 @@ async def upload_file(request: Request, file: UploadFile = File(None)):
 @app.get("/files/{filename}")
 async def get_file(filename: str):
     """מאפשר להוריד או לצפות בקובץ לפי שם."""
-    file_path = os.path.join(UPLOAD_DIR, filename)
+    # פענוח שם הקובץ שקודד קודם לכן
+    decoded_filename = unquote(filename)
+    file_path = os.path.join(UPLOAD_DIR, decoded_filename)
+
     if os.path.exists(file_path):
         return FileResponse(file_path)
     else:
