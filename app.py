@@ -5,6 +5,15 @@ from urllib.parse import quote, unquote
 
 app = FastAPI()
 
+# ✅ הוספת תמיכה ב-CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # אפשר להחליף לכתובת שלך בלבד אם תרצה לאבטח
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # ───────────────────────────────────────────────
 # תיקייה זמנית לשמירת קבצים
 UPLOAD_DIR = "uploads"
