@@ -2,6 +2,8 @@ from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.responses import JSONResponse, FileResponse
 import os, shutil, threading, time
 from urllib.parse import quote, unquote
+from fastapi.middleware.cors import CORSMiddleware
+
 
 app = FastAPI()
 
