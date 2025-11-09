@@ -1,9 +1,8 @@
 from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.responses import JSONResponse, FileResponse
-import os, shutil, threading, time
-from urllib.parse import quote, unquote
 from fastapi.middleware.cors import CORSMiddleware
-
+import os, shutil, threading, time, requests
+from urllib.parse import quote, unquote
 
 app = FastAPI()
 
@@ -17,6 +16,9 @@ app.add_middleware(
 )
 
 # ───────────────────────────────────────────────
+# קריאת טוקן הסביבה של RunPod
+RUNPOD_TOKEN = os.getenv("RUNPOD_TOKEN")
+
 # תיקייה זמנית לשמירת קבצים
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -103,7 +105,6 @@ async def upload_file(request: Request, file: UploadFile = File(None)):
 @app.get("/files/{filename}")
 async def get_file(filename: str):
     """מאפשר להוריד או לצפות בקובץ לפי שם."""
-    # פענוח שם הקובץ שקודד קודם לכן
     decoded_filename = unquote(filename)
     file_path = os.path.join(UPLOAD_DIR, decoded_filename)
 
@@ -113,4 +114,56 @@ async def get_file(filename: str):
         return JSONResponse({
             "error": "הקובץ נמחק או לא נמצא (ייתכן שחלפה שעה מאז ההעלאה)."
         }, status_code=404)
+# ───────────────────────────────────────────────
+
+
+# ───────────────────────────────────────────────
+# בקשה ל-RunPod דרך השרת (מוגן עם טוקן סביבתי)
+@app.post("/transcribe")
+async def transcribe(request: Request):
+    """
+    מקבל בקשת תמלול מה-Frontend ושולח אותה ל-RunPod
+    בעזרת ה-Token השמור בשרת (ולא בצד הלקוח)
+    """
+    try:
+        data = await request.json()
+
+        response = requests.post(
+            "https://api.runpod.ai/v2/lco4rijwxicjyi/run",
+            headers={
+                "Authorization": f"Bearer {RUNPOD_TOKEN}",
+                "Content-Type": "application/json"
+            },
+            json=data,
+            timeout=180
+        )
+
+        print("🔁 RunPod /run Response:", response.status_code)
+        return JSONResponse(content=response.json())
+
+    except Exception as e:
+        print(f"❌ שגיאה ב-/transcribe: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+# ───────────────────────────────────────────────
+
+
+# ───────────────────────────────────────────────
+@app.get("/status/{job_id}")
+async def check_status(job_id: str):
+    """
+    בודק את הסטטוס של משימת תמלול קיימת ב-RunPod
+    """
+    try:
+        response = requests.get(
+            f"https://api.runpod.ai/v2/lco4rijwxicjyi/status/{job_id}",
+            headers={"Authorization": f"Bearer {RUNPOD_TOKEN}"},
+            timeout=60
+        )
+
+        print(f"🔍 RunPod /status/{job_id} → {response.status_code}")
+        return JSONResponse(content=response.json())
+
+    except Exception as e:
+        print(f"❌ שגיאה ב-/status/{job_id}: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
 # ───────────────────────────────────────────────
