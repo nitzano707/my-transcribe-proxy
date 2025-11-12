@@ -24,11 +24,13 @@ app.add_middleware(
 
 # ───────────────────────────────────────────────
 # משתני סביבה
-RUNPOD_TOKEN = os.getenv("RUNPOD_TOKEN")
+RUNPOD_TOKEN = os.getenv("RUNPOD_TOKEN")  # לא בשימוש לשליחת תמלול; נשאר ל/status
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
-RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY")
+RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY")  # טוקן ברירת מחדל (fallback)
+FALLBACK_LIMIT_DEFAULT = float(os.getenv("FALLBACK_LIMIT_DEFAULT", "0.5"))  # $
+RUNPOD_RATE_PER_SEC = float(os.getenv("RUNPOD_RATE_PER_SEC", "0.0002"))     # $/sec
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -58,7 +60,7 @@ async def ping():
 # ───────────────────────────────────────────────
 
 
-# 🧩 פונקציה לפענוח AES (תואם CryptoJS)
+# 🧩 פענוח AES (תואם CryptoJS)
 def decrypt_token(encrypted_token: str) -> str:
     """פענוח טוקן מוצפן (תואם AES של CryptoJS ב-Frontend)."""
     try:
@@ -73,40 +75,82 @@ def decrypt_token(encrypted_token: str) -> str:
         return None
 
 
-# 🧠 פונקציה לשליפת טוקן המשתמש
-def get_user_token(user_email: str) -> str:
+# 🔎 שליפת רשומת חשבון
+def get_account(user_email: str):
+    res = (
+        supabase.table("accounts")
+        .select("owner_email, runpod_token_encrypted, used_credits, limit_credits")
+        .eq("owner_email", user_email)
+        .maybe_single()
+        .execute()
+    )
+    return res.data if hasattr(res, "data") else None
+
+
+# 🧠 טוקן לשימוש (משתמש/ברירת מחדל)
+def get_user_token(user_email: str) -> tuple[str, bool]:
     """
-    מחזיר טוקן רנפוד תקף למשתמש:
-    - אם יש לו טוקן מוצפן ב-Supabase → מפוענח ומוחזר
-    - אחרת → מוחזר טוקן ברירת מחדל (RUNPOD_API_KEY)
+    מחזיר (token, using_fallback):
+    - אם יש טוקן מוצפן → מפוענח ומוחזר, using_fallback=False
+    - אחרת → מוחזר RUNPOD_API_KEY, using_fallback=True
     """
     try:
-        result = (
-            supabase.table("accounts")
-            .select("runpod_token_encrypted")
-            .eq("owner_email", user_email)
-            .execute()
-        )
-        if not result.data:
-            print("⚠️ משתמש ללא טוקן — שימוש בברירת מחדל.")
-            return RUNPOD_API_KEY
-
-        encrypted = result.data[0].get("runpod_token_encrypted")
-        if not encrypted:
-            print("⚠️ רשומה ללא טוקן מוצפן — שימוש בברירת מחדל.")
-            return RUNPOD_API_KEY
-
-        token = decrypt_token(encrypted)
-        if token:
-            print(f"🔐 נטען טוקן משתמש עבור {user_email[:3]}***")
-            return token
-        else:
-            print("⚠️ שגיאה בפענוח — שימוש בברירת מחדל.")
-            return RUNPOD_API_KEY
-
+        row = get_account(user_email)
+        enc = row.get("runpod_token_encrypted") if row else None
+        if enc:
+            token = decrypt_token(enc)
+            if token:
+                return token, False
+        # אין טוקן אישי → ברירת מחדל
+        return RUNPOD_API_KEY, True
     except Exception as e:
         print(f"❌ שגיאה בשליפת טוקן: {e}")
-        return RUNPOD_API_KEY
+        return RUNPOD_API_KEY, True
+
+
+# ⛔ בדיקת מגבלה למשתמש על טוקן ברירת המחדל
+def check_fallback_allowance(user_email: str) -> tuple[bool, float, float]:
+    """
+    מחזיר (allowed, used, limit).
+    אם אין רשומה — יוצר ברירת מחדל: used=0, limit=FALLBACK_LIMIT_DEFAULT
+    """
+    row = get_account(user_email)
+    if not row:
+        # צור רשומה בסיסית עם תקרה ברירת מחדל
+        supabase.table("accounts").insert({
+            "owner_email": user_email,
+            "used_credits": 0.0,
+            "limit_credits": FALLBACK_LIMIT_DEFAULT
+        }).execute()
+        return True, 0.0, FALLBACK_LIMIT_DEFAULT
+
+    used = float(row.get("used_credits") or 0.0)
+    limit = float(row.get("limit_credits") or FALLBACK_LIMIT_DEFAULT)
+    return (used < limit), used, limit
+
+
+# 💾 עדכון שימוש (דולרים) לאחר ריצה בטוקן ברירת מחדל
+def add_fallback_usage(user_email: str, amount_usd: float):
+    row = get_account(user_email)
+    used = float((row or {}).get("used_credits") or 0.0)
+    new_used = round(used + amount_usd, 6)
+    supabase.table("accounts").update({"used_credits": new_used}).eq("owner_email", user_email).execute()
+    return new_used
+
+
+# 💵 הערכת עלות מריצה (אם קיבלנו executionTime במילישניות)
+def estimate_cost_from_response(resp_json: dict) -> float:
+    # RunPod מחזיר לעתים executionTime במילישניות בשדה העליון
+    ms = (
+        resp_json.get("executionTime")
+        or (resp_json.get("output", {}) or {}).get("executionTime")
+        or 0
+    )
+    try:
+        seconds = float(ms) / 1000.0
+    except Exception:
+        seconds = 0.0
+    return round(seconds * RUNPOD_RATE_PER_SEC, 6)
 
 
 # ───────────────────────────────────────────────
@@ -163,13 +207,54 @@ async def get_file(filename: str):
 
 @app.post("/transcribe")
 async def transcribe(request: Request):
-    """שליחת בקשת תמלול ל-RunPod"""
+    """
+    שליחת בקשת תמלול ל-RunPod:
+    - מצפה ל-body שיכיל לפחות user_email ו/או input מלא מוכן לריצה.
+    - אם אין טוקן למשתמש → בודק מגבלת שימוש לטוקן ברירת המחדל.
+    - אחרי ריצה עם ברירת מחדל → מעדכן used_credits לפי executionTime (אם קיים).
+    """
     try:
         data = await request.json()
-        user_email = data.get("user_email")
 
-        # קבלת טוקן לפי משתמש
-        token_to_use = get_user_token(user_email)
+        user_email = data.get("user_email")
+        if not user_email:
+            return JSONResponse({"error": "user_email is required"}, status_code=400)
+
+        # טוקן לשימוש
+        token_to_use, using_fallback = get_user_token(user_email)
+
+        # אם נשתמש בטוקן ברירת המחדל — בדוק מגבלת שימוש
+        if using_fallback:
+            allowed, used, limit = check_fallback_allowance(user_email)
+            if not allowed:
+                return JSONResponse(
+                    {
+                        "error": "חריגה ממגבלת שימוש לטוקן ברירת המחדל",
+                        "used_credits": used,
+                        "limit_credits": limit,
+                        "action": "יש להזין טוקן RunPod אישי"
+                    },
+                    status_code=402,
+                )
+
+        # תומך בשני מצבים:
+        # 1) אתה שולח input מלא (כמו היום) → נריץ כמו שהוא
+        # 2) אתה שולח רק file_url → נבנה את ה-input הסטנדרטי
+        run_body = data
+        if "input" not in data and data.get("file_url"):
+            run_body = {
+                "input": {
+                    "engine": "stable-whisper",
+                    "model": "ivrit-ai/whisper-large-v3-turbo-ct2",
+                    "transcribe_args": {
+                        "url": data["file_url"],
+                        "language": "he",
+                        "diarize": True,
+                        "vad": True,
+                        "word_timestamps": True,
+                    },
+                }
+            }
 
         response = requests.post(
             "https://api.runpod.ai/v2/lco4rijwxicjyi/run",
@@ -177,11 +262,21 @@ async def transcribe(request: Request):
                 "Authorization": f"Bearer {token_to_use}",
                 "Content-Type": "application/json",
             },
-            json=data,
+            json=run_body,
             timeout=180,
         )
         print("🔁 RunPod /run Response:", response.status_code)
-        return JSONResponse(content=response.json())
+        out = response.json()
+
+        # אם השתמשנו בברירת המחדל — עדכן שימוש משוער
+        if using_fallback:
+            cost = estimate_cost_from_response(out)
+            if cost > 0:
+                new_used = add_fallback_usage(user_email, cost)
+                out["_usage"] = {"estimated_cost_usd": cost, "used_credits": new_used}
+
+        return JSONResponse(content=out)
+
     except Exception as e:
         print(f"❌ שגיאה ב-/transcribe: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -259,3 +354,25 @@ def fetch_and_store_audio(request: Request, file_id: str, format_hint: str = "mp
         print(f"❌ fetch-and-store-audio error: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
 # ───────────────────────────────────────────────
+
+
+# 💰 יתרת משתמש ברנפוד (GraphQL)
+@app.get("/balance")
+def get_balance(user_email: str):
+    try:
+        token, _ = get_user_token(user_email)
+        gql = {"query": "query { myself { clientBalance } }"}
+        r = requests.post(
+            "https://api.runpod.io/graphql",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json=gql,
+            timeout=20,
+        )
+        data = r.json()
+        balance = (
+            ((data or {}).get("data") or {}).get("myself") or {}
+        ).get("clientBalance", None)
+        return JSONResponse({"balance": balance})
+    except Exception as e:
+        print(f"❌ /balance error: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
