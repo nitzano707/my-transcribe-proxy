@@ -400,9 +400,17 @@ def get_job_status(job_id: str, user_email: str = None):
 # ───────────────────────────────────────────────
 @app.get("/effective-balance")
 def effective_balance(user_email: str):
-    """מחזיר יתרה אפקטיבית ומוסיף fallback אם אין רשומה."""
+    """
+    מחזיר יתרה אפקטיבית למשתמש.
+    אם המשתמש לא קיים — נוצרת רשומה חדשה עם מגבלת fallback (ברירת מחדל 0.5$).
+    אם יש טוקן מוצפן אישי — נבדקת היתרה האמיתית ב-RunPod.
+    אחרת — נעשה שימוש ביתרת fallback הפנימית.
+    """
     try:
+        # 🟢 בדיקה אם המשתמש כבר קיים במסד
         row = get_account(user_email)
+
+        # 🆕 אם אין רשומה – צור חדשה עם טוקן ברירת מחדל (אם קיים)
         if not row:
             encrypted_default = encrypt_default_token(RUNPOD_API_KEY) if RUNPOD_API_KEY else None
             payload = {
@@ -412,10 +420,17 @@ def effective_balance(user_email: str):
             }
             if encrypted_default:
                 payload["runpod_token_encrypted"] = encrypted_default
+
             supabase.table("accounts").insert(payload).execute()
             need_token = encrypted_default is None
-            return JSONResponse({"balance": FALLBACK_LIMIT_DEFAULT, "need_token": need_token})
 
+            # ✅ נחזיר תמיד מחרוזת עם דיוק של 6 ספרות
+            return JSONResponse({
+                "balance": f"{FALLBACK_LIMIT_DEFAULT:.6f}",
+                "need_token": need_token
+            })
+
+        # 🪙 אם יש טוקן מוצפן – נבדוק יתרה אמיתית בחשבון RunPod
         enc = row.get("runpod_token_encrypted")
         if enc:
             token = decrypt_token(enc)
@@ -430,15 +445,27 @@ def effective_balance(user_email: str):
                         bal = float(r.json().get("balance", 0.0))
                     except Exception:
                         bal = 0.0
-                    return JSONResponse({"balance": bal, "need_token": False})
+                    # ✅ גם כאן נחזיר מחרוזת עם 6 ספרות
+                    return JSONResponse({
+                        "balance": f"{bal:.6f}",
+                        "need_token": False
+                    })
 
-        used = float(row.get("used_credits") or 0)
+        # 🧮 אחרת – נחשב יתרת fallback פנימית
+        used = float(row.get("used_credits") or 0.0)
         limit = float(row.get("limit_credits") or FALLBACK_LIMIT_DEFAULT)
-        remaining = max(limit - used, 0)
-        return JSONResponse({"balance": remaining, "need_token": remaining <= 0})
+        remaining = max(limit - used, 0.0)
+
+        # ✅ שמירה על דיוק תצוגה
+        return JSONResponse({
+            "balance": f"{remaining:.6f}",
+            "need_token": remaining <= 0
+        })
+
     except Exception as e:
         print(f"❌ /effective-balance error: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
+
 
 
 # ───────────────────────────────────────────────
