@@ -1,9 +1,9 @@
 from fastapi import FastAPI, UploadFile, File, Request
-from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import os, threading, time, requests
 from urllib.parse import quote, unquote
-import base64, json
+import base64
 from supabase import create_client, Client
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
@@ -25,8 +25,8 @@ app.add_middleware(
 RUNPOD_TOKEN = os.getenv("RUNPOD_TOKEN")  # אופציונלי
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")  # חייב להיות מוגדר
-RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY")  # טוקן ברירת המחדל (fallback)
+ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")  # חובה
+RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY")  # טוקן fallback
 FALLBACK_LIMIT_DEFAULT = float(os.getenv("FALLBACK_LIMIT_DEFAULT", "0.5"))
 RUNPOD_RATE_PER_SEC = float(os.getenv("RUNPOD_RATE_PER_SEC", "0.0002"))
 
@@ -58,7 +58,6 @@ async def ping():
 def decrypt_token(encrypted_token: str) -> str | None:
     try:
         if not ENCRYPTION_KEY:
-            print("❌ ENCRYPTION_KEY לא מוגדר בסביבה.")
             return None
         key = ENCRYPTION_KEY.encode("utf-8")
         data = base64.b64decode(encrypted_token)
@@ -84,10 +83,7 @@ def get_account(user_email: str):
 
 
 def get_user_token(user_email: str) -> tuple[str | None, bool]:
-    """
-    מחזיר (token_to_use, using_fallback)
-    using_fallback=True אומר שמשתמשים בטוקן ברירת מחדל (או שאין כלל).
-    """
+    """מחזיר (token_to_use, using_fallback)."""
     try:
         row = get_account(user_email)
         enc = row.get("runpod_token_encrypted") if row else None
@@ -95,14 +91,11 @@ def get_user_token(user_email: str) -> tuple[str | None, bool]:
             token = decrypt_token(enc)
             if token:
                 return token, False
-        # אם אין טוקן מוצפן — נשתמש ב-RUNPOD_API_KEY (אם קיים)
         if RUNPOD_API_KEY:
             return RUNPOD_API_KEY, True
-        # ללא טוקן כלל
         return None, True
     except Exception as e:
         print(f"❌ שגיאה בשליפת טוקן: {e}")
-        # fallback לטוקן הסביבתי אם קיים
         return (RUNPOD_API_KEY if RUNPOD_API_KEY else None), True
 
 
@@ -110,7 +103,6 @@ def encrypt_default_token(token: str) -> str | None:
     """הצפנה של טוקן ברירת מחדל כך שיישמר כמו טוקן רגיל."""
     try:
         if not ENCRYPTION_KEY:
-            print("❌ ENCRYPTION_KEY לא מוגדר בסביבה.")
             return None
         key = ENCRYPTION_KEY.encode("utf-8")
         iv = os.urandom(16)
@@ -120,15 +112,12 @@ def encrypt_default_token(token: str) -> str | None:
         ciphertext = cipher.encrypt(padded)
         return base64.b64encode(iv + ciphertext).decode("utf-8")
     except Exception as e:
-        print(f"❌ שגיאה בהצפנה של טוקן ברירת מחדל: {e}")
+        print(f"❌ שגיאה בהצפנת טוקן ברירת מחדל: {e}")
         return None
 
 
 def check_fallback_allowance(user_email: str) -> tuple[bool, float, float]:
-    """
-    בודק אם המשתמש רשום; אם לא — יוצר רשומה עם טוקן fallback מוצפן (אם יש RUNPOD_API_KEY).
-    מחזיר (allowed, used, limit)
-    """
+    """בודק אם המשתמש רשום; אם לא — יוצר רשומה עם טוקן fallback."""
     row = get_account(user_email)
     if not row:
         encrypted_default = encrypt_default_token(RUNPOD_API_KEY) if RUNPOD_API_KEY else None
@@ -156,9 +145,7 @@ def add_fallback_usage(user_email: str, amount_usd: float):
 
 
 def estimate_cost_from_response(resp_json: dict) -> float:
-    """
-    מעריך עלות על בסיס executionTime (מילישניות) * תעריף לשנייה.
-    """
+    """מעריך עלות על בסיס executionTime * תעריף."""
     ms = (
         resp_json.get("executionTime")
         or (resp_json.get("output", {}) or {}).get("executionTime")
@@ -169,6 +156,7 @@ def estimate_cost_from_response(resp_json: dict) -> float:
     except Exception:
         seconds = 0.0
     return round(seconds * RUNPOD_RATE_PER_SEC, 6)
+
 
 # ───────────────────────────────────────────────
 @app.post("/upload")
@@ -183,6 +171,7 @@ async def upload_file(request: Request, file: UploadFile = File(None)):
                 filename, content = f"upload_{int(time.time())}.bin", body
         if not content:
             return JSONResponse({"error": "לא התקבל קובץ תקין."}, status_code=400)
+
         file_path = os.path.join(UPLOAD_DIR, filename)
         with open(file_path, "wb") as f:
             f.write(content)
@@ -203,6 +192,32 @@ async def get_file(filename: str):
     return JSONResponse({"error": "הקובץ נמחק או לא נמצא."}, status_code=404)
 
 
+# ───────────────────────────────────────────────
+# 📥 שליפת קובץ מדרייב לשרת (לתמלול)
+@app.get("/fetch-and-store-audio")
+async def fetch_and_store_audio(file_id: str):
+    """מוריד קובץ שמע מדרייב ושומר זמנית בשרת, מחזיר URL לשימוש."""
+    try:
+        drive_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+        r = requests.get(drive_url, stream=True)
+        if not r.ok:
+            return JSONResponse({"error": "שגיאה בהורדת הקובץ מדרייב"}, status_code=400)
+
+        filename = f"drive_{file_id}_{int(time.time())}.mp3"
+        file_path = os.path.join(UPLOAD_DIR, filename)
+        with open(file_path, "wb") as f:
+            for chunk in r.iter_content(1024 * 64):
+                f.write(chunk)
+
+        delete_later(file_path)
+        file_url = f"{BASE_URL}/files/{quote(filename)}"
+        return JSONResponse({"url": file_url})
+    except Exception as e:
+        print(f"❌ /fetch-and-store-audio error: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ───────────────────────────────────────────────
 @app.post("/transcribe")
 async def transcribe(request: Request):
     try:
@@ -212,8 +227,6 @@ async def transcribe(request: Request):
             return JSONResponse({"error": "user_email is required"}, status_code=400)
 
         token_to_use, using_fallback = get_user_token(user_email)
-
-        # אם אין בכלל טוקן לעבוד איתו:
         if not token_to_use:
             return JSONResponse(
                 {"error": "לא הוגדר טוקן לשימוש (אין טוקן אישי ואין RUNPOD_API_KEY בשרת).", "action": "יש להזין טוקן RunPod אישי"},
@@ -228,7 +241,6 @@ async def transcribe(request: Request):
                     status_code=402,
                 )
 
-        # בניית גוף קריאה לרנפוד אם לא סופק input מלא
         run_body = data
         if "input" not in data and data.get("file_url"):
             run_body = {
@@ -245,7 +257,6 @@ async def transcribe(request: Request):
                 }
             }
 
-        # ⚠️ שים לב: דומיין ה-API של RunPod עשוי להיות .io/.ai בהתאם לשירות
         response = requests.post(
             "https://api.runpod.ai/v2/lco4rijwxicjyi/run",
             headers={"Authorization": f"Bearer {token_to_use}", "Content-Type": "application/json"},
@@ -265,14 +276,30 @@ async def transcribe(request: Request):
         print(f"❌ /transcribe error: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
+
+# ───────────────────────────────────────────────
+@app.get("/status/{job_id}")
+def get_job_status(job_id: str, user_email: str = None):
+    """בודק את סטטוס המשימה ב-RunPod לפי מזהה job_id."""
+    try:
+        token, _ = get_user_token(user_email or "anonymous@example.com")
+        r = requests.get(
+            f"https://api.runpod.ai/v2/lco4rijwxicjyi/status/{job_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=15,
+        )
+        if not r.ok:
+            return JSONResponse({"error": "שגיאה בשליפת סטטוס מ-RunPod"}, status_code=r.status_code)
+        return JSONResponse(r.json())
+    except Exception as e:
+        print(f"❌ /status error: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 # ───────────────────────────────────────────────
 @app.get("/effective-balance")
 def effective_balance(user_email: str):
-    """
-    מחזיר יתרה אפקטיבית.
-    אם המשתמש אינו קיים — יוצר רשומה חדשה עם מגבלת fallback, ובמידת האפשר
-    מוסיף גם runpod_token_encrypted מוצפן של RUNPOD_API_KEY.
-    """
+    """מחזיר יתרה אפקטיבית ומוסיף fallback אם אין רשומה."""
     try:
         row = get_account(user_email)
         if not row:
@@ -285,16 +312,13 @@ def effective_balance(user_email: str):
             if encrypted_default:
                 payload["runpod_token_encrypted"] = encrypted_default
             supabase.table("accounts").insert(payload).execute()
-            # אם אין טוקן ברירת מחדל — המשתמש עדיין יצטרך להזין טוקן אישי
             need_token = encrypted_default is None
             return JSONResponse({"balance": FALLBACK_LIMIT_DEFAULT, "need_token": need_token})
 
-        # אם יש טוקן מוצפן — נבדוק יתרה ב-RunPod של המשתמש
         enc = row.get("runpod_token_encrypted")
         if enc:
             token = decrypt_token(enc)
             if token:
-                # שים לב: חשבון רנפוד הוא ב-endpoint של .io לפי התיעוד העדכני
                 r = requests.get(
                     "https://api.runpod.io/v2/account",
                     headers={"Authorization": f"Bearer {token}"},
@@ -307,7 +331,6 @@ def effective_balance(user_email: str):
                         bal = 0.0
                     return JSONResponse({"balance": bal, "need_token": False})
 
-        # אחרת — מחשבים יתרת fallback פנימית
         used = float(row.get("used_credits") or 0)
         limit = float(row.get("limit_credits") or FALLBACK_LIMIT_DEFAULT)
         remaining = max(limit - used, 0)
@@ -316,10 +339,9 @@ def effective_balance(user_email: str):
         print(f"❌ /effective-balance error: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
-# ───────────────────────────────────────────────
-# 🧱  ניהול תמלולים מאובטח דרך השרת (במקום דרך ה-Frontend)
-# ───────────────────────────────────────────────
 
+# ───────────────────────────────────────────────
+# 🧱 ניהול תמלולים מאובטח דרך השרת
 @app.post("/db/transcriptions/create")
 async def create_transcription(request: Request):
     try:
@@ -337,7 +359,6 @@ async def create_transcription(request: Request):
             "audio_id": audio_id,
             "media_type": media_type
         }).execute()
-
         return JSONResponse({"status": "ok", "data": res.data})
     except Exception as e:
         print("❌ /db/transcriptions/create:", e)
@@ -372,9 +393,7 @@ async def delete_transcription(request: Request):
 
 @app.post("/save-token")
 async def save_token(request: Request):
-    """
-    שומר טוקן חדש למשתמש ב-Supabase לאחר הצפנה בצד שרת.
-    """
+    """שומר טוקן מוצפן חדש למשתמש ב-Supabase."""
     try:
         data = await request.json()
         user_email = data.get("user_email")
@@ -382,11 +401,9 @@ async def save_token(request: Request):
 
         if not user_email or not token:
             return JSONResponse({"error": "חסר user_email או token"}, status_code=400)
-
         if not ENCRYPTION_KEY:
             return JSONResponse({"error": "ENCRYPTION_KEY לא מוגדר בשרת"}, status_code=500)
 
-        # הצפנה עם מפתח השרת (AES-CBC + PKCS#7)
         key = ENCRYPTION_KEY.encode("utf-8")
         iv = os.urandom(16)
         cipher = AES.new(key[:32], AES.MODE_CBC, iv)
@@ -394,7 +411,6 @@ async def save_token(request: Request):
         padded = token.encode() + bytes([padding_len]) * padding_len
         encrypted = base64.b64encode(iv + cipher.encrypt(padded)).decode()
 
-        # עדכון או יצירה
         row = get_account(user_email)
         if row:
             supabase.table("accounts").update(
