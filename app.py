@@ -195,26 +195,53 @@ async def get_file(filename: str):
 # ───────────────────────────────────────────────
 # 📥 שליפת קובץ מדרייב לשרת (לתמלול)
 @app.get("/fetch-and-store-audio")
-async def fetch_and_store_audio(file_id: str):
-    """מוריד קובץ שמע מדרייב ושומר זמנית בשרת, מחזיר URL לשימוש."""
+async def fetch_and_store_audio(file_id: str, token: str = None):
+    """
+    שולף קובץ מדרייב, שומר זמנית בתיקיית uploads, ומחזיר URL ישיר לגישה.
+    הסיומת נשמרת לפי סוג התוכן בפועל.
+    """
     try:
-        drive_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-        r = requests.get(drive_url, stream=True)
-        if not r.ok:
-            return JSONResponse({"error": "שגיאה בהורדת הקובץ מדרייב"}, status_code=400)
+        if not token:
+            return JSONResponse({"error": "חסר access token של Google"}, status_code=400)
 
-        filename = f"drive_{file_id}_{int(time.time())}.mp3"
+        headers = {"Authorization": f"Bearer {token}"}
+        drive_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
+
+        res = requests.get(drive_url, headers=headers, stream=True)
+        if not res.ok:
+            return JSONResponse({"error": f"שגיאה בשליפת קובץ מדרייב: {res.text}"}, status_code=res.status_code)
+
+        # נזהה את סוג הקובץ האמיתי
+        content_type = res.headers.get("Content-Type", "application/octet-stream")
+        ext_map = {
+            "audio/mp4": ".m4a",
+            "audio/x-m4a": ".m4a",
+            "audio/mpeg": ".mp3",
+            "audio/wav": ".wav",
+            "audio/x-wav": ".wav",
+            "video/mp4": ".mp4",
+            "audio/webm": ".webm",
+        }
+        ext = ext_map.get(content_type, ".audio")
+
+        # נשמור בשם עם הסיומת הנכונה
+        filename = f"drive_{file_id}_{int(time.time())}{ext}"
         file_path = os.path.join(UPLOAD_DIR, filename)
+
         with open(file_path, "wb") as f:
-            for chunk in r.iter_content(1024 * 64):
+            for chunk in res.iter_content(chunk_size=8192):
                 f.write(chunk)
 
         delete_later(file_path)
         file_url = f"{BASE_URL}/files/{quote(filename)}"
+
+        print(f"✅ נשמר קובץ מדרייב: {file_path} ({content_type})")
         return JSONResponse({"url": file_url})
+
     except Exception as e:
         print(f"❌ /fetch-and-store-audio error: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
+
 
 
 # ───────────────────────────────────────────────
