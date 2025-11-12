@@ -71,8 +71,8 @@ def decrypt_token(encrypted_token: str) -> str:
 def get_account(user_email: str):
     res = (
         supabase.table("accounts")
-        .select("owner_email, runpod_token_encrypted, used_credits, limit_credits")
-        .eq("owner_email", user_email)
+        .select("user_email, runpod_token_encrypted, used_credits, limit_credits")
+        .eq("userr_email", user_email)
         .maybe_single()
         .execute()
     )
@@ -114,7 +114,7 @@ def check_fallback_allowance(user_email: str) -> tuple[bool, float, float]:
     if not row:
         encrypted_default = encrypt_default_token(RUNPOD_API_KEY)
         supabase.table("accounts").insert({
-            "owner_email": user_email,
+            "user_email": user_email,
             "runpod_token_encrypted": encrypted_default,
             "used_credits": 0.0,
             "limit_credits": FALLBACK_LIMIT_DEFAULT
@@ -131,7 +131,7 @@ def add_fallback_usage(user_email: str, amount_usd: float):
     row = get_account(user_email)
     used = float((row or {}).get("used_credits") or 0.0)
     new_used = round(used + amount_usd, 6)
-    supabase.table("accounts").update({"used_credits": new_used}).eq("owner_email", user_email).execute()
+    supabase.table("accounts").update({"used_credits": new_used}).eq("user_email", user_email).execute()
     return new_used
 
 
@@ -237,7 +237,7 @@ def effective_balance(user_email: str):
         row = get_account(user_email)
         if not row:
             supabase.table("accounts").insert({
-                "owner_email": user_email,
+                "user_email": user_email,
                 "used_credits": 0.0,
                 "limit_credits": FALLBACK_LIMIT_DEFAULT
             }).execute()
