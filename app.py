@@ -4,6 +4,13 @@ from fastapi.middleware.cors import CORSMiddleware
 import os, threading, time, requests
 from urllib.parse import quote, unquote
 
+# ✅ ספריות חדשות
+from supabase import create_client, Client
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import unpad
+import base64
+
+# ───────────────────────────────────────────────
 app = FastAPI()
 
 # ✅ CORS
@@ -16,13 +23,22 @@ app.add_middleware(
 )
 
 # ───────────────────────────────────────────────
+# משתני סביבה
 RUNPOD_TOKEN = os.getenv("RUNPOD_TOKEN")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
+RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY")
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 BASE_URL = "https://my-transcribe-proxy.onrender.com"
+
+# חיבור ל-Supabase
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 # ───────────────────────────────────────────────
+
 
 def delete_later(path, delay=3600):
     """מוחק קובץ אוטומטית לאחר שעה (ברירת מחדל)."""
@@ -33,6 +49,7 @@ def delete_later(path, delay=3600):
             print(f"[Auto Delete] נמחק הקובץ: {path}")
     threading.Thread(target=_delete, daemon=True).start()
 
+
 # ───────────────────────────────────────────────
 @app.api_route("/ping", methods=["GET", "HEAD"])
 async def ping():
@@ -40,6 +57,59 @@ async def ping():
     return JSONResponse({"status": "ok"})
 # ───────────────────────────────────────────────
 
+
+# 🧩 פונקציה לפענוח AES (תואם CryptoJS)
+def decrypt_token(encrypted_token: str) -> str:
+    """פענוח טוקן מוצפן (תואם AES של CryptoJS ב-Frontend)."""
+    try:
+        key = bytes.fromhex(ENCRYPTION_KEY)
+        data = base64.b64decode(encrypted_token)
+        iv, ciphertext = data[:16], data[16:]
+        cipher = AES.new(key, AES.MODE_CBC, iv)
+        decrypted = unpad(cipher.decrypt(ciphertext), AES.block_size)
+        return decrypted.decode("utf-8")
+    except Exception as e:
+        print(f"❌ שגיאה בפענוח טוקן: {e}")
+        return None
+
+
+# 🧠 פונקציה לשליפת טוקן המשתמש
+def get_user_token(user_email: str) -> str:
+    """
+    מחזיר טוקן רנפוד תקף למשתמש:
+    - אם יש לו טוקן מוצפן ב-Supabase → מפוענח ומוחזר
+    - אחרת → מוחזר טוקן ברירת מחדל (RUNPOD_API_KEY)
+    """
+    try:
+        result = (
+            supabase.table("accounts")
+            .select("runpod_token_encrypted")
+            .eq("owner_email", user_email)
+            .execute()
+        )
+        if not result.data:
+            print("⚠️ משתמש ללא טוקן — שימוש בברירת מחדל.")
+            return RUNPOD_API_KEY
+
+        encrypted = result.data[0].get("runpod_token_encrypted")
+        if not encrypted:
+            print("⚠️ רשומה ללא טוקן מוצפן — שימוש בברירת מחדל.")
+            return RUNPOD_API_KEY
+
+        token = decrypt_token(encrypted)
+        if token:
+            print(f"🔐 נטען טוקן משתמש עבור {user_email[:3]}***")
+            return token
+        else:
+            print("⚠️ שגיאה בפענוח — שימוש בברירת מחדל.")
+            return RUNPOD_API_KEY
+
+    except Exception as e:
+        print(f"❌ שגיאה בשליפת טוקן: {e}")
+        return RUNPOD_API_KEY
+
+
+# ───────────────────────────────────────────────
 @app.post("/upload")
 async def upload_file(request: Request, file: UploadFile = File(None)):
     """מקבל קובץ אודיו/וידאו ושומר זמנית"""
@@ -75,6 +145,7 @@ async def upload_file(request: Request, file: UploadFile = File(None)):
         return JSONResponse({"error": f"שגיאה בעת העלאת הקובץ: {str(e)}"}, status_code=500)
 # ───────────────────────────────────────────────
 
+
 @app.get("/files/{filename}")
 async def get_file(filename: str):
     """מאפשר הורדה או צפייה בקובץ לפי שם"""
@@ -89,15 +160,21 @@ async def get_file(filename: str):
         )
 # ───────────────────────────────────────────────
 
+
 @app.post("/transcribe")
 async def transcribe(request: Request):
     """שליחת בקשת תמלול ל-RunPod"""
     try:
         data = await request.json()
+        user_email = data.get("user_email")
+
+        # קבלת טוקן לפי משתמש
+        token_to_use = get_user_token(user_email)
+
         response = requests.post(
             "https://api.runpod.ai/v2/lco4rijwxicjyi/run",
             headers={
-                "Authorization": f"Bearer {RUNPOD_TOKEN}",
+                "Authorization": f"Bearer {token_to_use}",
                 "Content-Type": "application/json",
             },
             json=data,
@@ -109,6 +186,7 @@ async def transcribe(request: Request):
         print(f"❌ שגיאה ב-/transcribe: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
 # ───────────────────────────────────────────────
+
 
 @app.get("/status/{job_id}")
 async def check_status(job_id: str):
@@ -125,6 +203,7 @@ async def check_status(job_id: str):
         print(f"❌ שגיאה ב-/status/{job_id}: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
 # ───────────────────────────────────────────────
+
 
 @app.get("/fetch-audio")
 def fetch_audio(request: Request, file_id: str):
@@ -146,6 +225,7 @@ def fetch_audio(request: Request, file_id: str):
         print(f"❌ fetch-audio error: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
 # ───────────────────────────────────────────────
+
 
 @app.get("/fetch-and-store-audio")
 def fetch_and_store_audio(request: Request, file_id: str, format_hint: str = "mp3"):
