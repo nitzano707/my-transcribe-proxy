@@ -145,17 +145,31 @@ def add_fallback_usage(user_email: str, amount_usd: float):
 
 
 def estimate_cost_from_response(resp_json: dict) -> float:
-    """מעריך עלות על בסיס executionTime * תעריף."""
-    ms = (
-        resp_json.get("executionTime")
-        or (resp_json.get("output", {}) or {}).get("executionTime")
-        or 0
-    )
+    """
+    מעריך עלות על בסיס executionTime ממבנים שונים בתגובה של RunPod.
+    מחזיר ערך מדויק גם אם זמן העיבוד קצר מאוד.
+    """
     try:
+        # ננסה כמה אפשרויות למציאת זמן העיבוד
+        ms = (
+            resp_json.get("executionTime")
+            or (resp_json.get("output", {}) or {}).get("executionTime")
+            or (resp_json.get("output", [{}])[0].get("executionTime") if isinstance(resp_json.get("output"), list) else 0)
+            or 0
+        )
         seconds = float(ms) / 1000.0
-    except Exception:
-        seconds = 0.0
-    return round(seconds * RUNPOD_RATE_PER_SEC, 6)
+        cost = seconds * RUNPOD_RATE_PER_SEC
+
+        if cost > 0:
+            print(f"⏱ זמן עיבוד כולל: {seconds:.2f} שניות → עלות מוערכת: {cost:.8f}$")
+        else:
+            print("⚠️ זמן עיבוד לא זוהה בתגובה של RunPod:", resp_json.keys())
+
+        return round(cost, 8)
+    except Exception as e:
+        print(f"❌ שגיאה ב-estimate_cost_from_response: {e}")
+        return 0.0
+
 
 
 # ───────────────────────────────────────────────
