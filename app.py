@@ -315,3 +315,43 @@ async def delete_transcription(request: Request):
     except Exception as e:
         print("❌ /db/transcriptions/delete:", e)
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+
+@app.post("/save-token")
+def save_token(request: Request):
+    """
+    שומר טוקן חדש למשתמש ב-Supabase לאחר הצפנה בצד שרת.
+    """
+    try:
+        data = request.json()
+        user_email = data.get("user_email")
+        token = data.get("token")
+
+        if not user_email or not token:
+            return JSONResponse({"error": "חסר user_email או token"}, status_code=400)
+
+        # הצפנה עם מפתח השרת
+        key = ENCRYPTION_KEY.encode("utf-8")
+        iv = os.urandom(16)
+        cipher = AES.new(key[:32], AES.MODE_CBC, iv)
+        padding_len = AES.block_size - len(token.encode()) % AES.block_size
+        padded = token.encode() + bytes([padding_len]) * padding_len
+        encrypted = base64.b64encode(iv + cipher.encrypt(padded)).decode()
+
+        # עדכון או יצירה
+        row = get_account(user_email)
+        if row:
+            supabase.table("accounts").update(
+                {"runpod_token_encrypted": encrypted, "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+            ).eq("user_email", user_email).execute()
+        else:
+            supabase.table("accounts").insert(
+                {"user_email": user_email, "runpod_token_encrypted": encrypted, "used_credits": 0.0, "limit_credits": FALLBACK_LIMIT_DEFAULT}
+            ).execute()
+
+        return JSONResponse({"status": "ok"})
+    except Exception as e:
+        print(f"❌ /save-token error: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
