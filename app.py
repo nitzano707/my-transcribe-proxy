@@ -238,6 +238,7 @@ def effective_balance(user_email: str):
         if not row:
             supabase.table("accounts").insert({
                 "user_email": user_email,
+                "runpod_token_encrypted": encrypted_default,  # ✅ נוסף
                 "used_credits": 0.0,
                 "limit_credits": FALLBACK_LIMIT_DEFAULT
             }).execute()
