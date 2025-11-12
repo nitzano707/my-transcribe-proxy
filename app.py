@@ -195,15 +195,17 @@ async def get_file(filename: str):
 # ───────────────────────────────────────────────
 # 📥 שליפת קובץ מדרייב לשרת (לתמלול)
 @app.get("/fetch-and-store-audio")
-async def fetch_and_store_audio(file_id: str, token: str = None):
+async def fetch_and_store_audio(request: Request, file_id: str):
     """
-    שולף קובץ מדרייב, שומר זמנית בתיקיית uploads, ומחזיר URL ישיר לגישה.
-    הסיומת נשמרת לפי סוג התוכן בפועל.
+    שולף קובץ מדרייב, שומר זמנית, מחזיר URL.
+    תומך ב-Authorization header עם Bearer token.
     """
     try:
-        if not token:
+        auth_header = request.headers.get("Authorization")
+        if not auth_header or not auth_header.startswith("Bearer "):
             return JSONResponse({"error": "חסר access token של Google"}, status_code=400)
 
+        token = auth_header.split("Bearer ")[1]
         headers = {"Authorization": f"Bearer {token}"}
         drive_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
 
@@ -211,20 +213,16 @@ async def fetch_and_store_audio(file_id: str, token: str = None):
         if not res.ok:
             return JSONResponse({"error": f"שגיאה בשליפת קובץ מדרייב: {res.text}"}, status_code=res.status_code)
 
-        # נזהה את סוג הקובץ האמיתי
         content_type = res.headers.get("Content-Type", "application/octet-stream")
         ext_map = {
             "audio/mp4": ".m4a",
             "audio/x-m4a": ".m4a",
             "audio/mpeg": ".mp3",
             "audio/wav": ".wav",
-            "audio/x-wav": ".wav",
             "video/mp4": ".mp4",
-            "audio/webm": ".webm",
         }
         ext = ext_map.get(content_type, ".audio")
 
-        # נשמור בשם עם הסיומת הנכונה
         filename = f"drive_{file_id}_{int(time.time())}{ext}"
         file_path = os.path.join(UPLOAD_DIR, filename)
 
@@ -234,13 +232,13 @@ async def fetch_and_store_audio(file_id: str, token: str = None):
 
         delete_later(file_path)
         file_url = f"{BASE_URL}/files/{quote(filename)}"
-
         print(f"✅ נשמר קובץ מדרייב: {file_path} ({content_type})")
         return JSONResponse({"url": file_url})
 
     except Exception as e:
         print(f"❌ /fetch-and-store-audio error: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
+
 
 
 
