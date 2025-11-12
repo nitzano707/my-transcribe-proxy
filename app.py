@@ -56,19 +56,21 @@ async def ping():
     return JSONResponse({"status": "ok"})
 # ───────────────────────────────────────────────
 
-# 🧩 פענוח AES (תואם CryptoJS)
+# 🧩 פענוח AES (תואם CryptoJS) נחליף את הפענוח בגרסה תואמת ל־CryptoJS
 def decrypt_token(encrypted_token: str) -> str:
-    """פענוח טוקן מוצפן (תואם AES של CryptoJS ב-Frontend)."""
+    """פענוח טוקן מוצפן (תואם CryptoJS ב-Frontend)"""
     try:
-        key = bytes.fromhex(ENCRYPTION_KEY)
+        # שימוש ישיר במחרוזת מפתח, לא בהקס
+        key = ENCRYPTION_KEY.encode("utf-8")
         data = base64.b64decode(encrypted_token)
         iv, ciphertext = data[:16], data[16:]
-        cipher = AES.new(key, AES.MODE_CBC, iv)
+        cipher = AES.new(key[:32], AES.MODE_CBC, iv)
         decrypted = unpad(cipher.decrypt(ciphertext), AES.block_size)
         return decrypted.decode("utf-8")
     except Exception as e:
         print(f"❌ שגיאה בפענוח טוקן: {e}")
         return None
+
 
 # 🔎 שליפת רשומת חשבון
 def get_account(user_email: str):
