@@ -93,18 +93,38 @@ def get_user_token(user_email: str) -> tuple[str, bool]:
         return RUNPOD_API_KEY, True
 
 
+def encrypt_default_token(token: str) -> str:
+    """הצפנה של טוקן ברירת מחדל כך שיישמר כמו טוקן רגיל."""
+    try:
+        key = ENCRYPTION_KEY.encode("utf-8")
+        iv = os.urandom(16)
+        cipher = AES.new(key[:32], AES.MODE_CBC, iv)
+        ciphertext = cipher.encrypt(
+            (token + (AES.block_size - len(token) % AES.block_size) * chr(AES.block_size - len(token) % AES.block_size)).encode("utf-8")
+        )
+        return base64.b64encode(iv + ciphertext).decode("utf-8")
+    except Exception as e:
+        print(f"❌ שגיאה בהצפנה של טוקן ברירת מחדל: {e}")
+        return None
+
+
 def check_fallback_allowance(user_email: str) -> tuple[bool, float, float]:
+    """בודק אם המשתמש רשום; אם לא — יוצר רשומה עם טוקן fallback מוצפן."""
     row = get_account(user_email)
     if not row:
+        encrypted_default = encrypt_default_token(RUNPOD_API_KEY)
         supabase.table("accounts").insert({
             "owner_email": user_email,
+            "runpod_token_encrypted": encrypted_default,
             "used_credits": 0.0,
             "limit_credits": FALLBACK_LIMIT_DEFAULT
         }).execute()
         return True, 0.0, FALLBACK_LIMIT_DEFAULT
+
     used = float(row.get("used_credits") or 0.0)
     limit = float(row.get("limit_credits") or FALLBACK_LIMIT_DEFAULT)
     return (used < limit), used, limit
+
 
 
 def add_fallback_usage(user_email: str, amount_usd: float):
