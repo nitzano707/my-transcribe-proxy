@@ -353,20 +353,48 @@ async def transcribe(request: Request):
 # ───────────────────────────────────────────────
 @app.get("/status/{job_id}")
 def get_job_status(job_id: str, user_email: str = None):
-    """בודק את סטטוס המשימה ב-RunPod לפי מזהה job_id."""
+    """
+    בודק את סטטוס המשימה ב-RunPod לפי מזהה job_id.
+    אם הסתיים בהצלחה (COMPLETED) — מחשב עלות, מעדכן יתרה ומחזיר מידע כולל שימוש.
+    """
     try:
-        token, _ = get_user_token(user_email or "anonymous@example.com")
+        token_to_use, using_fallback = get_user_token(user_email or "anonymous@example.com")
+        if not token_to_use:
+            return JSONResponse({"error": "Missing token"}, status_code=401)
+
         r = requests.get(
             f"https://api.runpod.ai/v2/lco4rijwxicjyi/status/{job_id}",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=15,
+            headers={"Authorization": f"Bearer {token_to_use}"},
+            timeout=30,
         )
         if not r.ok:
             return JSONResponse({"error": "שגיאה בשליפת סטטוס מ-RunPod"}, status_code=r.status_code)
-        return JSONResponse(r.json())
+
+        out = r.json() if r.content else {}
+
+        # ✅ רק אם המשימה הושלמה נחשב עלות ונעדכן יתרה
+        if using_fallback and out.get("status") == "COMPLETED":
+            cost = estimate_cost_from_response(out)
+            if cost > 0:
+                new_used = add_fallback_usage(user_email, cost)
+                remaining = max(FALLBACK_LIMIT_DEFAULT - new_used, 0)
+                print(
+                    f"💰 fallback user {user_email} used {cost:.8f}$ "
+                    f"(total {new_used:.6f}$, remaining {remaining:.6f}$)"
+                )
+                out["_usage"] = {
+                    "estimated_cost_usd": cost,
+                    "used_credits": new_used,
+                    "remaining": remaining,
+                }
+            else:
+                print("⚖️ עלות לא אותרה או אפסית בתגובה של RunPod.")
+
+        return JSONResponse(content=out, status_code=r.status_code)
     except Exception as e:
         print(f"❌ /status error: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
+
 
 
 # ───────────────────────────────────────────────
