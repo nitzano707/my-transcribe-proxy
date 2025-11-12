@@ -72,7 +72,7 @@ def get_account(user_email: str):
     res = (
         supabase.table("accounts")
         .select("user_email, runpod_token_encrypted, used_credits, limit_credits")
-        .eq("userr_email", user_email)
+        .eq("user_email", user_email)
         .maybe_single()
         .execute()
     )
@@ -319,12 +319,12 @@ async def delete_transcription(request: Request):
 
 
 @app.post("/save-token")
-def save_token(request: Request):
+async def save_token(request: Request):
     """
     שומר טוקן חדש למשתמש ב-Supabase לאחר הצפנה בצד שרת.
     """
     try:
-        data = request.json()
+        data = await request.json()
         user_email = data.get("user_email")
         token = data.get("token")
 
