@@ -167,3 +167,28 @@ async def check_status(job_id: str):
         print(f"❌ שגיאה ב-/status/{job_id}: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
 # ───────────────────────────────────────────────
+
+
+@app.get("/fetch-audio")
+def fetch_audio(request: Request, file_id: str):
+    """
+    מוריד קובץ מדרייב בשם המשתמש.
+    דורש שה-Frontend ישלח Header עם Authorization: Bearer <user_token>
+    """
+    try:
+        user_token = request.headers.get("Authorization")
+        if not user_token:
+            return JSONResponse({"error": "חסר טוקן משתמש (Authorization header)"}, status_code=401)
+
+        drive_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
+        headers = {"Authorization": user_token}
+
+        r = requests.get(drive_url, headers=headers, stream=True)
+        if not r.ok:
+            return JSONResponse({"error": f"שגיאה בשליפה מדרייב ({r.status_code})"}, status_code=r.status_code)
+
+        from fastapi.responses import StreamingResponse
+        return StreamingResponse(r.iter_content(8192), media_type=r.headers.get("Content-Type", "audio/mpeg"))
+    except Exception as e:
+        print(f"❌ fetch-audio error: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
