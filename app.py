@@ -45,7 +45,7 @@ def delete_later(path, delay=3600):
         time.sleep(delay)
         if os.path.exists(path):
             os.remove(path)
-            print(f"[Auto Delete] נמחק הקובץ: {path}")
+            print(f"[Auto Delete] נמחק הקובץ: {path}", flush=True)
     threading.Thread(target=_delete, daemon=True).start()
 
 
@@ -66,7 +66,7 @@ def decrypt_token(encrypted_token: str) -> str | None:
         decrypted = unpad(cipher.decrypt(ciphertext), AES.block_size)
         return decrypted.decode("utf-8")
     except Exception as e:
-        print(f"❌ שגיאה בפענוח טוקן: {e}")
+        print(f"❌ שגיאה בפענוח טוקן: {e}", flush=True)
         return None
 
 
@@ -95,7 +95,7 @@ def get_user_token(user_email: str) -> tuple[str | None, bool]:
             return RUNPOD_API_KEY, True
         return None, True
     except Exception as e:
-        print(f"❌ שגיאה בשליפת טוקן: {e}")
+        print(f"❌ שגיאה בשליפת טוקן: {e}", flush=True)
         return (RUNPOD_API_KEY if RUNPOD_API_KEY else None), True
 
 
@@ -112,7 +112,7 @@ def encrypt_default_token(token: str) -> str | None:
         ciphertext = cipher.encrypt(padded)
         return base64.b64encode(iv + ciphertext).decode("utf-8")
     except Exception as e:
-        print(f"❌ שגיאה בהצפנת טוקן ברירת מחדל: {e}")
+        print(f"❌ שגיאה בהצפנת טוקן ברירת מחדל: {e}", flush=True)
         return None
 
 
@@ -150,7 +150,6 @@ def estimate_cost_from_response(resp_json: dict) -> float:
     מחזיר ערך מדויק גם אם זמן העיבוד קצר מאוד.
     """
     try:
-        # ננסה כמה אפשרויות למציאת זמן העיבוד
         ms = (
             resp_json.get("executionTime")
             or (resp_json.get("output", {}) or {}).get("executionTime")
@@ -161,15 +160,14 @@ def estimate_cost_from_response(resp_json: dict) -> float:
         cost = seconds * RUNPOD_RATE_PER_SEC
 
         if cost > 0:
-            print(f"⏱ זמן עיבוד כולל: {seconds:.2f} שניות → עלות מוערכת: {cost:.8f}$")
+            print(f"⏱ זמן עיבוד כולל: {seconds:.2f} שניות → עלות מוערכת: {cost:.8f}$", flush=True)
         else:
-            print("⚠️ זמן עיבוד לא זוהה בתגובה של RunPod:", resp_json.keys())
+            print("⚠️ זמן עיבוד לא זוהה בתגובה של RunPod:", list(resp_json.keys()), flush=True)
 
         return round(cost, 8)
     except Exception as e:
-        print(f"❌ שגיאה ב-estimate_cost_from_response: {e}")
+        print(f"❌ שגיאה ב-estimate_cost_from_response: {e}", flush=True)
         return 0.0
-
 
 
 # ───────────────────────────────────────────────
@@ -246,23 +244,20 @@ async def fetch_and_store_audio(request: Request, file_id: str):
 
         delete_later(file_path)
         file_url = f"{BASE_URL}/files/{quote(filename)}"
-        print(f"✅ נשמר קובץ מדרייב: {file_path} ({content_type})")
+        print(f"✅ נשמר קובץ מדרייב: {file_path} ({content_type})", flush=True)
         return JSONResponse({"url": file_url})
 
     except Exception as e:
-        print(f"❌ /fetch-and-store-audio error: {e}")
+        print(f"❌ /fetch-and-store-audio error: {e}", flush=True)
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
-
-
-# ───────────────────────────────────────────────
 # ───────────────────────────────────────────────
 @app.post("/transcribe")
 async def transcribe(request: Request):
     """
-    שליחת בקשת תמלול ל-RunPod והערכת עלות לפי זמן העיבוד.
-    אם המשתמש פועל על fallback (טוקן ברירת מחדל), המערכת תעדכן את השימוש (used_credits).
+    שליחת בקשת תמלול ל-RunPod.
+    לא מחייבים לפי זמן בשלב זה; החיוב/עדכון מתבצע רק כש-STATUS נהיה COMPLETED במסלול /status/{job_id}.
     """
     try:
         data = await request.json()
@@ -272,7 +267,6 @@ async def transcribe(request: Request):
 
         # 🔑 שליפת טוקן
         token_to_use, using_fallback = get_user_token(user_email)
-
         if not token_to_use:
             return JSONResponse(
                 {
@@ -324,30 +318,12 @@ async def transcribe(request: Request):
         out = response.json() if response.content else {}
         status_code = response.status_code if response.status_code else 200
 
-        # 💰 חישוב עלות לפי זמן עיבוד
-        cost = estimate_cost_from_response(out)
-        usage_info = {"estimated_cost_usd": cost}
-
-        if cost > 0:
-            if using_fallback:
-                new_used = add_fallback_usage(user_email, cost)
-                remaining = round(FALLBACK_LIMIT_DEFAULT - new_used, 6)
-                usage_info.update({
-                    "used_credits": new_used,
-                    "limit_credits": FALLBACK_LIMIT_DEFAULT,
-                    "remaining": remaining
-                })
-                print(f"💰 fallback user {user_email} used {cost}$ (total {new_used}$, remaining {remaining}$)")
-            else:
-                print(f"💳 personal token used by {user_email}: {cost}$ (not tracked in DB)")
-
-        out["_usage"] = usage_info
+        # כאן אין חישוב עלות. משאירים ל-/status/{job_id} כשמסתיים.
         return JSONResponse(content=out, status_code=status_code)
 
     except Exception as e:
-        print(f"❌ /transcribe error: {e}")
+        print(f"❌ /transcribe error: {e}", flush=True)
         return JSONResponse({"error": str(e)}, status_code=500)
-
 
 
 # ───────────────────────────────────────────────
@@ -372,29 +348,29 @@ def get_job_status(job_id: str, user_email: str = None):
 
         out = r.json() if r.content else {}
 
-        # ✅ רק אם המשימה הושלמה נחשב עלות ונעדכן יתרה
+        # ✅ רק אם המשימה הושלמה — מחשבים עלות ונעדכן יתרה
         if using_fallback and out.get("status") == "COMPLETED":
             cost = estimate_cost_from_response(out)
-            if cost > 0:
+            if cost > 0 and user_email:
                 new_used = add_fallback_usage(user_email, cost)
-                remaining = max(FALLBACK_LIMIT_DEFAULT - new_used, 0)
+                remaining = max(FALLBACK_LIMIT_DEFAULT - new_used, 0.0)
                 print(
                     f"💰 fallback user {user_email} used {cost:.8f}$ "
-                    f"(total {new_used:.6f}$, remaining {remaining:.6f}$)"
+                    f"(total {new_used:.6f}$, remaining {remaining:.6f}$)",
+                    flush=True
                 )
                 out["_usage"] = {
-                    "estimated_cost_usd": cost,
-                    "used_credits": new_used,
-                    "remaining": remaining,
+                    "estimated_cost_usd": float(f"{cost:.8f}"),
+                    "used_credits": float(f"{new_used:.6f}"),
+                    "remaining": float(f"{remaining:.6f}"),
                 }
             else:
-                print("⚖️ עלות לא אותרה או אפסית בתגובה של RunPod.")
+                print("⚖️ עלות לא אותרה או אפסית בתגובה של RunPod.", flush=True)
 
         return JSONResponse(content=out, status_code=r.status_code)
     except Exception as e:
-        print(f"❌ /status error: {e}")
+        print(f"❌ /status error: {e}", flush=True)
         return JSONResponse({"error": str(e)}, status_code=500)
-
 
 
 # ───────────────────────────────────────────────
@@ -423,10 +399,11 @@ def effective_balance(user_email: str):
 
             supabase.table("accounts").insert(payload).execute()
             need_token = encrypted_default is None
-
-            # ✅ נחזיר תמיד מחרוזת עם דיוק של 6 ספרות
+            bal_str = f"{FALLBACK_LIMIT_DEFAULT:.6f}"
+            print(f"💰 יתרה נוכחית של {user_email}: {bal_str}$", flush=True)
             return JSONResponse({
-                "balance": f"{FALLBACK_LIMIT_DEFAULT:.6f}",
+                "balance": bal_str,
+                "balance_num": float(bal_str),
                 "need_token": need_token
             })
 
@@ -445,9 +422,11 @@ def effective_balance(user_email: str):
                         bal = float(r.json().get("balance", 0.0))
                     except Exception:
                         bal = 0.0
-                    # ✅ גם כאן נחזיר מחרוזת עם 6 ספרות
+                    bal_str = f"{bal:.6f}"
+                    print(f"💰 יתרה נוכחית של {user_email}: {bal_str}$", flush=True)
                     return JSONResponse({
-                        "balance": f"{bal:.6f}",
+                        "balance": bal_str,
+                        "balance_num": float(bal_str),
                         "need_token": False
                     })
 
@@ -456,16 +435,17 @@ def effective_balance(user_email: str):
         limit = float(row.get("limit_credits") or FALLBACK_LIMIT_DEFAULT)
         remaining = max(limit - used, 0.0)
 
-        # ✅ שמירה על דיוק תצוגה
+        bal_str = f"{remaining:.6f}"
+        print(f"💰 יתרה נוכחית של {user_email}: {bal_str}$", flush=True)
         return JSONResponse({
-            "balance": f"{remaining:.6f}",
+            "balance": bal_str,
+            "balance_num": float(bal_str),
             "need_token": remaining <= 0
         })
 
     except Exception as e:
-        print(f"❌ /effective-balance error: {e}")
+        print(f"❌ /effective-balance error: {e}", flush=True)
         return JSONResponse({"error": str(e)}, status_code=500)
-
 
 
 # ───────────────────────────────────────────────
@@ -489,7 +469,7 @@ async def create_transcription(request: Request):
         }).execute()
         return JSONResponse({"status": "ok", "data": res.data})
     except Exception as e:
-        print("❌ /db/transcriptions/create:", e)
+        print("❌ /db/transcriptions/create:", e, flush=True)
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
@@ -503,7 +483,7 @@ async def update_transcription(request: Request):
         res = supabase.table("transcriptions").update(updates).eq("id", id).execute()
         return JSONResponse({"status": "ok", "data": res.data})
     except Exception as e:
-        print("❌ /db/transcriptions/update:", e)
+        print("❌ /db/transcriptions/update:", e, flush=True)
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
@@ -515,7 +495,7 @@ async def delete_transcription(request: Request):
         supabase.table("transcriptions").delete().eq("id", id).execute()
         return JSONResponse({"status": "deleted", "id": id})
     except Exception as e:
-        print("❌ /db/transcriptions/delete:", e)
+        print("❌ /db/transcriptions/delete:", e, flush=True)
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
@@ -551,5 +531,5 @@ async def save_token(request: Request):
 
         return JSONResponse({"status": "ok"})
     except Exception as e:
-        print(f"❌ /save-token error: {e}")
+        print(f"❌ /save-token error: {e}", flush=True)
         return JSONResponse({"error": str(e)}, status_code=500)
