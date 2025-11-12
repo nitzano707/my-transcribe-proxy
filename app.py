@@ -243,29 +243,46 @@ async def fetch_and_store_audio(request: Request, file_id: str):
 
 
 # ───────────────────────────────────────────────
+# ───────────────────────────────────────────────
 @app.post("/transcribe")
 async def transcribe(request: Request):
+    """
+    שליחת בקשת תמלול ל-RunPod והערכת עלות לפי זמן העיבוד.
+    אם המשתמש פועל על fallback (טוקן ברירת מחדל), המערכת תעדכן את השימוש (used_credits).
+    """
     try:
         data = await request.json()
         user_email = data.get("user_email")
         if not user_email:
             return JSONResponse({"error": "user_email is required"}, status_code=400)
 
+        # 🔑 שליפת טוקן
         token_to_use, using_fallback = get_user_token(user_email)
+
         if not token_to_use:
             return JSONResponse(
-                {"error": "לא הוגדר טוקן לשימוש (אין טוקן אישי ואין RUNPOD_API_KEY בשרת).", "action": "יש להזין טוקן RunPod אישי"},
-                status_code=401
+                {
+                    "error": "לא הוגדר טוקן לשימוש (אין טוקן אישי ואין RUNPOD_API_KEY בשרת).",
+                    "action": "יש להזין טוקן RunPod אישי"
+                },
+                status_code=401,
             )
 
+        # 🔒 בדיקת מגבלת שימוש (רק למשתמשים על fallback)
         if using_fallback:
             allowed, used, limit = check_fallback_allowance(user_email)
             if not allowed:
                 return JSONResponse(
-                    {"error": "חריגה ממגבלת שימוש", "used": used, "limit": limit, "action": "יש להזין טוקן RunPod אישי"},
+                    {
+                        "error": "חריגה ממגבלת שימוש",
+                        "used": used,
+                        "limit": limit,
+                        "action": "יש להזין טוקן RunPod אישי"
+                    },
                     status_code=402,
                 )
 
+        # 🎯 בניית גוף הבקשה ל-RunPod
         run_body = data
         if "input" not in data and data.get("file_url"):
             run_body = {
@@ -282,24 +299,41 @@ async def transcribe(request: Request):
                 }
             }
 
+        # 🚀 שליחה ל-RunPod
         response = requests.post(
             "https://api.runpod.ai/v2/lco4rijwxicjyi/run",
             headers={"Authorization": f"Bearer {token_to_use}", "Content-Type": "application/json"},
             json=run_body,
             timeout=180,
         )
+
         out = response.json() if response.content else {}
+        status_code = response.status_code if response.status_code else 200
 
-        if using_fallback:
-            cost = estimate_cost_from_response(out)
-            if cost > 0:
+        # 💰 חישוב עלות לפי זמן עיבוד
+        cost = estimate_cost_from_response(out)
+        usage_info = {"estimated_cost_usd": cost}
+
+        if cost > 0:
+            if using_fallback:
                 new_used = add_fallback_usage(user_email, cost)
-                out["_usage"] = {"estimated_cost_usd": cost, "used_credits": new_used}
+                remaining = round(FALLBACK_LIMIT_DEFAULT - new_used, 6)
+                usage_info.update({
+                    "used_credits": new_used,
+                    "limit_credits": FALLBACK_LIMIT_DEFAULT,
+                    "remaining": remaining
+                })
+                print(f"💰 fallback user {user_email} used {cost}$ (total {new_used}$, remaining {remaining}$)")
+            else:
+                print(f"💳 personal token used by {user_email}: {cost}$ (not tracked in DB)")
 
-        return JSONResponse(content=out, status_code=response.status_code if response.status_code else 200)
+        out["_usage"] = usage_info
+        return JSONResponse(content=out, status_code=status_code)
+
     except Exception as e:
         print(f"❌ /transcribe error: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
+
 
 
 # ───────────────────────────────────────────────
