@@ -452,7 +452,7 @@ def effective_balance(user_email: str):
           token = decrypt_token(enc)
           if token:
               r = requests.get(
-                  "https://api.runpod.io/v2/account",
+                  "https://api.runpod.ai/v2/account",
                   headers={"Authorization": f"Bearer {token}"},
                   timeout=12,
               )
