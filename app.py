@@ -79,7 +79,7 @@ def get_account(user_email: str):
       .maybe_single()
       .execute()
   )
-     print("DEBUG get_account for", user_email, "→", res.data)
+    
   return res.data if hasattr(res, "data") else None
 
 
