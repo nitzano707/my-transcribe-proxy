@@ -188,10 +188,13 @@ def estimate_cost_from_response(resp_json: dict) -> float:
 
 
 # 🔢 שליפת יתרה אמיתית מרנפוד באמצעות GraphQL (לטוקן אישי)
-def get_real_runpod_balance(token: str) -> float:
+def get_real_runpod_balance(token: str) -> tuple[float, bool]:
     """
-    מבצע קריאת GraphQL ל-RunPod ומחזיר clientBalance כ-float.
-    במקרה של שגיאה מחזיר 0.0.
+    מבצע קריאת GraphQL ל-RunPod ומחזיר:
+    (clientBalance כ-float, is_valid כ-bool).
+
+    is_valid == False → שגיאת הרשאה / טוקן לא תקין / שגיאה ב-GraphQL.
+    is_valid == True  → הקריאה הצליחה; גם אם היתרה 0, זה עדיין טוקן תקין.
     """
     try:
         payload = {
@@ -209,15 +212,25 @@ def get_real_runpod_balance(token: str) -> float:
 
         if not r.ok:
             print(f"❌ GraphQL account fetch failed: status={r.status_code}, body={r.text}")
-            return 0.0
+            return 0.0, False
 
         data = r.json() or {}
-        myself = (data.get("data") or {}).get("myself") or {}
+
+        # אם יש errors ב-GraphQL – הטוקן לא תקין / אין גישה
+        if "errors" in data:
+            print(f"❌ GraphQL errors: {data['errors']}")
+            return 0.0, False
+
+        myself = (data.get("data") or {}).get("myself") or None
+        if not myself or "clientBalance" not in myself:
+            print(f"❌ GraphQL response missing clientBalance: {data}")
+            return 0.0, False
+
         bal = float(myself.get("clientBalance", 0.0))
-        return bal
+        return bal, True
     except Exception as e:
         print(f"❌ Error parsing GraphQL balance: {e}")
-        return 0.0
+        return 0.0, False
 
 
 # ───────────────────────────────────────────────
@@ -455,6 +468,7 @@ def effective_balance(user_email: str):
 
     - אם המשתמש לא קיים → נוצרת רשומת fallback חדשה (used_credits=0, limit_credits=FALLBACK_LIMIT_DEFAULT).
     - אם יש טוקן מוצפן אישי → נבדקת היתרה האמיתית ב-RunPod (GraphQL account API).
+      אם הטוקן האישי **לא תקין** → מוחקים אותו, עוברים ל-fallback ומחזירים need_token=True.
     - אחרת → נעשה שימוש ביתרת fallback (limit - used_credits).
 
     תמיד מחזירים balance כמחרוזת בפורמט עם 6 ספרות עשרוניות.
@@ -483,14 +497,26 @@ def effective_balance(user_email: str):
         if enc:
             token = decrypt_token(enc)
             if token:
-                bal = get_real_runpod_balance(token)
-                balance_str = f"{bal:.6f}"
-                print(f"💰 יתרה נוכחית של {user_email}: {balance_str}$ (personal token)")
-                # למשתמש עם טוקן אישי לא נבקש שוב להזין טוקן – גם אם היתרה 0
-                return JSONResponse({
-                    "balance": balance_str,
-                    "need_token": False
-                })
+                bal, valid = get_real_runpod_balance(token)
+
+                if valid:
+                    balance_str = f"{bal:.6f}"
+                    print(f"💰 יתרה נוכחית של {user_email}: {balance_str}$ (personal token)")
+                    # למשתמש עם טוקן אישי לא נבקש שוב להזין טוקן – גם אם היתרה 0
+                    return JSONResponse({
+                        "balance": balance_str,
+                        "need_token": False
+                    })
+                else:
+                    # 🔴 טוקן אישי לא תקין → מוחקים אותו ועוברים למצב fallback
+                    print(f"⚠️ טוקן אישי לא תקין עבור {user_email} – מעבר ל-fallback ומבוקש טוקן חדש.")
+                    supabase.table("accounts").update(
+                        {
+                            "runpod_token_encrypted": None,
+                            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        }
+                    ).eq("user_email", user_email).execute()
+                    # נפיל למטה לחישוב fallback + need_token=True
 
         # 🧮 אחרת – נחשב יתרת fallback פנימית
         used = float(row.get("used_credits") or 0.0)
@@ -499,9 +525,11 @@ def effective_balance(user_email: str):
         balance_str = f"{remaining:.6f}"
 
         print(f"💰 יתרה נוכחית של {user_email}: {balance_str}$ (fallback)")
+        # אם הגענו לכאן אחרי טוקן אישי לא תקין – נרצה שהלקוח ידע שצריך להזין טוקן חדש
+        need_token_flag = remaining <= 0 or (enc is not None)
         return JSONResponse({
             "balance": balance_str,
-            "need_token": remaining <= 0
+            "need_token": need_token_flag
         })
 
     except Exception as e:
@@ -565,9 +593,11 @@ async def delete_transcription(request: Request):
 async def save_token(request: Request):
     """
     שומר טוקן RunPod אישי מוצפן למשתמש ב-Supabase.
+
     מרגע שיש טוקן אישי:
     - לא משתמשים יותר ב-RUNPOD_API_KEY עבורו.
     - לא מגבילים אותו לפי FALLBACK_LIMIT_DEFAULT (החיוב ב-RunPod עליו).
+    - מתבצעת בדיקת תקינות מול RunPod (GraphQL) לפני השמירה.
     """
     try:
         data = await request.json()
@@ -579,6 +609,12 @@ async def save_token(request: Request):
         if not ENCRYPTION_KEY:
             return JSONResponse({"error": "ENCRYPTION_KEY לא מוגדר בשרת"}, status_code=500)
 
+        # ✔️ בדיקת תקינות טוקן מול RunPod (כולל clientBalance)
+        balance, valid = get_real_runpod_balance(token)
+        if not valid:
+            return JSONResponse({"error": "טוקן RunPod שגוי או לא מורשה"}, status_code=400)
+
+        # ✔️ הצפנה
         key = ENCRYPTION_KEY.encode("utf-8")
         iv = os.urandom(16)
         cipher = AES.new(key[:32], AES.MODE_CBC, iv)
@@ -591,6 +627,7 @@ async def save_token(request: Request):
             supabase.table("accounts").update(
                 {
                     "runpod_token_encrypted": encrypted,
+                    "used_credits": 0.0,  # איפוס fallback – מרגע זה החיוב על המשתמש
                     "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 }
             ).eq("user_email", user_email).execute()
@@ -604,7 +641,11 @@ async def save_token(request: Request):
                 }
             ).execute()
 
-        return JSONResponse({"status": "ok"})
+        # מחזירים גם את היתרה האמיתית של המשתמש ב-RunPod (נוח ל־UI בעתיד)
+        return JSONResponse({
+            "status": "ok",
+            "balance": f"{float(balance):.6f}"
+        })
     except Exception as e:
         print(f"❌ /save-token error: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
