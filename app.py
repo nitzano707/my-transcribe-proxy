@@ -311,7 +311,8 @@ async def team_info(team_id: int):
         })
     except Exception as e:
         print("❌ /team/info:", e)
-        return JSONResponse({"error": str(e)}, status_code=500})
+        return JSONResponse({"error": str(e)}, status_code=500)
+
 
 
 @app.post("/team/update-quota")
@@ -334,7 +335,8 @@ async def team_update_quota(request: Request):
         return JSONResponse({"status": "ok"})
     except Exception as e:
         print("❌ /team/update-quota:", e)
-        return JSONResponse({"error": str(e)}, status_code=500})
+        return JSONResponse({"error": str(e)}, status_code=500)
+
 # ───────────────────────────────────────────────
 # 🟩 PROJECT API — ניהול פרויקטים בקבוצות
 # ───────────────────────────────────────────────
