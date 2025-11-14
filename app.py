@@ -878,6 +878,107 @@ async def user_get_mode(user_email: str):
         return JSONResponse({"error": str(e)}, 500)
 
 
+# ───────────────────────────────────────────────
+# 🟦 TEAM LIST — כל הקבוצות של משתמש
+# ───────────────────────────────────────────────
+
+@app.get("/teams/by-user")
+async def list_teams_for_user(user_email: str):
+    """
+    מחזיר את רשימת הקבוצות שמשתמש חבר בהן.
+    """
+    try:
+        rows = (
+            supabase.table("team_members")
+            .select("team_id, is_admin, teams(id, name, owner_email)")
+            .eq("user_email", user_email)
+            .execute()
+        ).data or []
+
+        # הופכים למבנה נוח
+        teams = []
+        for row in rows:
+            if row.get("teams"):
+                teams.append({
+                    "id": row["team_id"],
+                    "name": row["teams"]["name"],
+                    "owner_email": row["teams"]["owner_email"],
+                    "is_admin": row["is_admin"],
+                })
+
+        return JSONResponse({"teams": teams})
+
+    except Exception as e:
+        print("❌ /teams/by-user error:", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+
+# ───────────────────────────────────────────────
+# 🟦 PROJECT LIST — כל הפרויקטים בקבוצה
+# ───────────────────────────────────────────────
+
+@app.get("/projects/by-team")
+async def list_projects_for_team(team_id: int):
+    """
+    מחזיר את כל הפרויקטים של קבוצה מסוימת.
+    """
+    try:
+        rows = (
+            supabase.table("project")
+            .select("id, name, quota_seconds, team_id")
+            .eq("team_id", team_id)
+            .execute()
+        ).data or []
+
+        return JSONResponse({"projects": rows})
+
+    except Exception as e:
+        print("❌ /projects/by-team error:", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+
+# ───────────────────────────────────────────────
+# 🟩 ACCOUNT BALANCE — יתרה אפקטיבית למשתמש
+# ───────────────────────────────────────────────
+
+@app.get("/account/balance")
+async def account_balance(user_email: str):
+    """
+    מחזיר יתרה אפקטיבית לפי מצב משתמש:
+    - personal → אין חישוב פנימי (תמיד 999)
+    - guest → limit_credits - used_credits
+    - team → לא מחושב (תמיד 999 כדי לא לחסום העלאות)
+    """
+    try:
+        billing = resolve_billing_mode(user_email)
+        mode = billing["mode"]
+
+        # PERSONAL → אין מגבלות אצלנו
+        if mode == "personal":
+            return JSONResponse({"balance": 999.0, "need_token": False})
+
+        # TEAM → לא מגבילים אצלנו
+        if mode == "team":
+            return JSONResponse({"balance": 999.0, "need_token": False})
+
+        # GUEST → לפי fallback
+        allowed, used, limit = check_fallback_allowance(user_email)
+        remaining = max(0.0, limit - used)
+
+        return JSONResponse({
+            "balance": remaining,
+            "need_token": False
+        })
+
+    except Exception as e:
+        print("❌ /account/balance error:", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+
+
 ###############################################################
 #                       END OF FILE
 ###############################################################
