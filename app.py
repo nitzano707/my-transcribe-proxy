@@ -426,7 +426,7 @@ async def project_info(project_id: int):
 
     except Exception as e:
         print("❌ /project/info:", e)
-        return JSONResponse({"error": str(e)}, status_code=500})
+        return JSONResponse({"error": str(e)}, status_code=500)  # ✅ Fixed: removed extra }
 # ───────────────────────────────────────────────
 # 🟥 BILLING RESOLVER — לוגיקת חיוב משולבת
 # ───────────────────────────────────────────────
