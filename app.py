@@ -1,17 +1,24 @@
+###############################################################
+#                  TAMLLELI-PRO — FULL SERVER
+#            FastAPI · Supabase · RunPod · Team Billing
+#                   PART 1 / 3  (DO NOT EDIT)
+###############################################################
+
 from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-import os, threading, time, requests
+import os, threading, time, requests, base64
 from urllib.parse import quote, unquote
-import base64
 from supabase import create_client, Client
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
 
-# ───────────────────────────────────────────────
+###############################################################
+#                          APP INIT
+###############################################################
+
 app = FastAPI()
 
-# ✅ CORS – פתוח לכל
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,142 +27,151 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ───────────────────────────────────────────────
-# 🔧 משתני סביבה
+###############################################################
+#                     ENVIRONMENT VARIABLES
+###############################################################
+
 RUNPOD_TOKEN = os.getenv("RUNPOD_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
 RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY")
+
 FALLBACK_LIMIT_DEFAULT = float(os.getenv("FALLBACK_LIMIT_DEFAULT", "0.5"))
 RUNPOD_RATE_PER_SEC = float(os.getenv("RUNPOD_RATE_PER_SEC", "0.0002"))
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
 BASE_URL = "https://my-transcribe-proxy.onrender.com"
 
-# חיבור ל-Supabase
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ───────────────────────────────────────────────
+###############################################################
+#                     BASIC UTILITIES
+###############################################################
+
 def delete_later(path, delay=3600):
-    """מוחק קובץ אחרי delay שניות."""
     def _delete():
         time.sleep(delay)
         if os.path.exists(path):
             os.remove(path)
-            print(f"[Auto Delete] נמחק הקובץ: {path}")
+            print(f"[AutoDelete] Removed: {path}")
     threading.Thread(target=_delete, daemon=True).start()
 
-@app.api_route("/ping", methods=["GET", "HEAD"])
-async def ping():
-    return JSONResponse({"status": "ok"})
 
-# ───────────────────────────────────────────────
-# 🧩 פענוח AES (לטוקן אישי בלבד)
-def decrypt_token(encrypted_token: str) -> str | None:
+@app.get("/ping")
+def ping():
+    return {"status": "ok"}
+
+
+###############################################################
+#                TOKEN DECRYPTION (AES-CBC)
+###############################################################
+
+def decrypt_token(enc: str) -> str | None:
     try:
         if not ENCRYPTION_KEY:
             return None
         key = ENCRYPTION_KEY.encode("utf-8")
-        data = base64.b64decode(encrypted_token)
-        iv, ciphertext = data[:16], data[16:]
+        raw = base64.b64decode(enc)
+        iv, ciphertext = raw[:16], raw[16:]
         cipher = AES.new(key[:32], AES.MODE_CBC, iv)
         decrypted = unpad(cipher.decrypt(ciphertext), AES.block_size)
-        return decrypted.decode("utf-8")
+        return decrypted.decode()
     except Exception as e:
-        print(f"❌ שגיאה בפענוח טוקן: {e}")
+        print("❌ decrypt_token error:", e)
         return None
 
-# ───────────────────────────────────────────────
-# ⭐ פונקציות עזר לחשבונות
-def get_account(user_email: str):
+
+###############################################################
+#                  ACCOUNT HELPERS (PERSONAL)
+###############################################################
+
+def get_account(email: str):
     res = (
         supabase.table("accounts")
-        .select("user_email, runpod_token_encrypted, used_credits, limit_credits")
-        .eq("user_email", user_email)
+        .select("*")
+        .eq("user_email", email)
         .maybe_single()
         .execute()
     )
     return res.data if hasattr(res, "data") else None
 
-def get_user_token(user_email: str | None) -> tuple[str | None, bool]:
+
+def get_user_token(email: str | None):
     """
-    מחזיר (token_to_use, using_fallback).
+    Returns: (token_to_use, using_fallback)
     """
     try:
-        if not user_email:
+        if not email:
             if RUNPOD_API_KEY:
                 return RUNPOD_API_KEY, True
             return None, True
 
-        row = get_account(user_email)
-        enc = row.get("runpod_token_encrypted") if row else None
+        acc = get_account(email)
+        enc = acc.get("runpod_token_encrypted") if acc else None
 
         if enc:
-            token = decrypt_token(enc)
-            if token:
-                return token, False
+            t = decrypt_token(enc)
+            if t:
+                return t, False
 
         if RUNPOD_API_KEY:
             return RUNPOD_API_KEY, True
 
         return None, True
-    except Exception as e:
-        print(f"❌ שגיאה בשליפת טוקן: {e}")
-        return (RUNPOD_API_KEY if RUNPOD_API_KEY else None), True
 
-def check_fallback_allowance(user_email: str):
-    """
-    בודק יתרת fallback.
-    """
-    row = get_account(user_email)
+    except Exception as e:
+        print("❌ get_user_token:", e)
+        return RUNPOD_API_KEY, True
+
+
+def check_fallback_allowance(email: str):
+    row = get_account(email)
     if not row:
-        payload = {
-            "user_email": user_email,
+        supabase.table("accounts").insert({
+            "user_email": email,
             "used_credits": 0.0,
             "limit_credits": FALLBACK_LIMIT_DEFAULT,
-        }
-        supabase.table("accounts").insert(payload).execute()
+        }).execute()
         return True, 0.0, FALLBACK_LIMIT_DEFAULT
 
     used = float(row.get("used_credits") or 0.0)
     limit = float(row.get("limit_credits") or FALLBACK_LIMIT_DEFAULT)
-    return (used < limit), used, limit
+    return used < limit, used, limit
 
-def add_fallback_usage(user_email: str, amount_usd: float):
-    row = get_account(user_email)
-    used = float((row or {}).get("used_credits") or 0.0)
-    new_used = round(used + amount_usd, 6)
-    supabase.table("accounts").update({"used_credits": new_used}).eq("user_email", user_email).execute()
+
+def add_fallback_usage(email: str, usd: float):
+    row = get_account(email)
+    used = float(row.get("used_credits") or 0.0)
+    new_used = round(used + usd, 6)
+    supabase.table("accounts").update({"used_credits": new_used}).eq("user_email", email).execute()
     return new_used
 
-# ───────────────────────────────────────────────
-# ⭐ פונקציות עזר לקבוצות
+
+###############################################################
+#                     TEAM HELPERS
+###############################################################
+
 def decrypt_team_token(enc: str) -> str | None:
     try:
-        if not ENCRYPTION_KEY:
-            return None
-        key = ENCRYPTION_KEY.encode("utf-8")
-        data = base64.b64decode(enc)
-        iv, ciphertext = data[:16], data[16:]
-        cipher = AES.new(key[:32], AES.MODE_CBC, iv)
-        decrypted = unpad(cipher.decrypt(ciphertext), AES.block_size)
-        return decrypted.decode("utf-8")
-    except Exception as e:
-        print("❌ שגיאה בפענוח טוקן קבוצה:", e)
+        return decrypt_token(enc)
+    except:
         return None
 
-def get_teams_for_member(user_email: str):
+
+def get_teams_for_member(email: str):
     res = (
         supabase.table("team_members")
         .select("team_id, is_admin, teams(name, owner_email)")
-        .eq("user_email", user_email)
+        .eq("user_email", email)
         .execute()
     )
     return res.data or []
 
-def get_team_by_id(team_id: int):
+
+def get_team_row(team_id: int):
     res = (
         supabase.table("teams")
         .select("*")
@@ -163,7 +179,8 @@ def get_team_by_id(team_id: int):
         .maybe_single()
         .execute()
     )
-    return res.data if hasattr(res, "data") else None
+    return res.data
+
 
 def get_team_members(team_id: int):
     res = (
@@ -173,19 +190,14 @@ def get_team_members(team_id: int):
         .execute()
     )
     return res.data or []
-# ───────────────────────────────────────────────
-# 🟦 TEAM API — יצירת קבוצה, חברים, טוקן, מכסות
-# ───────────────────────────────────────────────
+
+
+###############################################################
+#                    TEAM API (CRUD)
+###############################################################
 
 @app.post("/team/create")
 async def team_create(request: Request):
-    """
-    יצירת קבוצה חדשה:
-    - name
-    - owner_email
-    - runpod_token (לא מוצפן מהקליינט)
-    - base_quota_seconds
-    """
     try:
         body = await request.json()
         name = body.get("name")
@@ -194,51 +206,44 @@ async def team_create(request: Request):
         quota = body.get("base_quota_seconds", 0)
 
         if not all([name, owner, token]):
-            return JSONResponse({"error": "חובה לספק name, owner_email ו-runpod_token"}, status_code=400)
+            return JSONResponse({"error": "name, owner_email, token required"}, 400)
 
         if not ENCRYPTION_KEY:
-            return JSONResponse({"error": "שרת ללא ENCRYPTION_KEY – לא ניתן להצפין טוקן"}, status_code=500)
+            return JSONResponse({"error": "missing ENCRYPTION_KEY"}, 500)
 
-        # הצפנה
         key = ENCRYPTION_KEY.encode("utf-8")
         iv = os.urandom(16)
         cipher = AES.new(key[:32], AES.MODE_CBC, iv)
-        padding_len = AES.block_size - len(token.encode()) % AES.block_size
-        padded = token.encode() + bytes([padding_len]) * padding_len
+
+        pad_len = AES.block_size - len(token.encode()) % AES.block_size
+        padded = token.encode() + bytes([pad_len]) * pad_len
+
         encrypted = base64.b64encode(iv + cipher.encrypt(padded)).decode()
 
-        # יצירת הקבוצה
-        r1 = supabase.table("teams").insert({
+        r = supabase.table("teams").insert({
             "name": name,
             "owner_email": owner,
             "runpod_token_encrypted": encrypted,
-            "base_quota_seconds": quota
+            "base_quota_seconds": quota,
         }).execute()
 
-        team = r1.data[0]
-        team_id = team["id"]
+        team = r.data[0]
 
-        # הכנסת הבעלים כחבר־על
         supabase.table("team_members").insert({
-            "team_id": team_id,
+            "team_id": team["id"],
             "user_email": owner,
-            "is_admin": True
+            "is_admin": True,
         }).execute()
 
         return JSONResponse({"status": "ok", "team": team})
+
     except Exception as e:
         print("❌ /team/create:", e)
-        return JSONResponse({"error": str(e)}, status_code=500)
+        return JSONResponse({"error": str(e)}, 500)
 
 
 @app.post("/team/add-member")
 async def team_add_member(request: Request):
-    """
-    הוספת משתמש לקבוצה:
-    - team_id
-    - user_email
-    - is_admin
-    """
     try:
         body = await request.json()
         team_id = body.get("team_id")
@@ -246,109 +251,108 @@ async def team_add_member(request: Request):
         is_admin = body.get("is_admin", False)
 
         if not all([team_id, member]):
-            return JSONResponse({"error": "חסר team_id או user_email"}, status_code=400)
+            return JSONResponse({"error": "team_id & user_email required"}, 400)
 
         supabase.table("team_members").insert({
             "team_id": team_id,
             "user_email": member,
-            "is_admin": is_admin
+            "is_admin": is_admin,
         }).execute()
 
-        return JSONResponse({"status": "ok"})
+        return {"status": "ok"}
+
     except Exception as e:
         print("❌ /team/add-member:", e)
-        return JSONResponse({"error": str(e)}, status_code=500)
-
+        return JSONResponse({"error": str(e)}, 500)
+###############################################################
+#                    TEAM API (CONTINUED)
+#                    PART 2 / 3 — DO NOT EDIT
+###############################################################
 
 @app.post("/team/remove-member")
 async def team_remove_member(request: Request):
-    """
-    הסרת משתמש מקבוצה
-    """
     try:
         body = await request.json()
         team_id = body.get("team_id")
         member = body.get("user_email")
 
         if not all([team_id, member]):
-            return JSONResponse({"error": "חסר team_id או user_email"}, status_code=400)
+            return JSONResponse({"error": "team_id & user_email required"}, 400)
 
-        supabase.table("team_members").delete().eq("team_id", team_id).eq("user_email", member).execute()
+        supabase.table("team_members") \
+            .delete() \
+            .eq("team_id", team_id) \
+            .eq("user_email", member) \
+            .execute()
 
-        return JSONResponse({"status": "deleted"})
+        return {"status": "deleted"}
+
     except Exception as e:
         print("❌ /team/remove-member:", e)
-        return JSONResponse({"error": str(e)}, status_code=500)
+        return JSONResponse({"error": str(e)}, 500)
 
 
 @app.get("/team/info")
 async def team_info(team_id: int):
     """
-    מחזיר:
-    - פרטי קבוצה
-    - חברים
-    - שימושים (team_usage)
+    Returns:
+      - team data
+      - members
+      - usage seconds
     """
     try:
-        team = get_team_by_id(team_id)
+        team = get_team_row(team_id)
         if not team:
-            return JSONResponse({"error": "קבוצה לא קיימת"}, status_code=404)
+            return JSONResponse({"error": "team not found"}, 404)
 
         members = get_team_members(team_id)
 
-        usage_res = (
+        usage = (
             supabase.table("team_usage")
-            .select("user_email, seconds_used")
+            .select("*")
             .eq("team_id", team_id)
             .execute()
-        )
-        usage = usage_res.data or []
+        ).data or []
 
         return JSONResponse({
             "team": team,
             "members": members,
-            "usage": usage
+            "usage": usage,
         })
+
     except Exception as e:
         print("❌ /team/info:", e)
-        return JSONResponse({"error": str(e)}, status_code=500)
-
+        return JSONResponse({"error": str(e)}, 500)
 
 
 @app.post("/team/update-quota")
 async def team_update_quota(request: Request):
-    """
-    עדכון מכסת שניות בסיס בקבוצה (base_quota_seconds)
-    """
     try:
         body = await request.json()
         team_id = body.get("team_id")
         quota = body.get("base_quota_seconds")
 
         if not all([team_id, quota]):
-            return JSONResponse({"error": "חסר team_id או base_quota_seconds"}, status_code=400)
+            return JSONResponse({"error": "team_id & base_quota_seconds required"}, 400)
 
-        supabase.table("teams").update({
-            "base_quota_seconds": quota
-        }).eq("id", team_id).execute()
+        supabase.table("teams") \
+            .update({"base_quota_seconds": quota}) \
+            .eq("id", team_id) \
+            .execute()
 
-        return JSONResponse({"status": "ok"})
+        return {"status": "ok"}
+
     except Exception as e:
         print("❌ /team/update-quota:", e)
-        return JSONResponse({"error": str(e)}, status_code=500)
+        return JSONResponse({"error": str(e)}, 500)
 
-# ───────────────────────────────────────────────
-# 🟩 PROJECT API — ניהול פרויקטים בקבוצות
-# ───────────────────────────────────────────────
+
+###############################################################
+#                     PROJECT API
+###############################################################
 
 @app.post("/project/create")
 async def project_create(request: Request):
-    """
-    יצירת פרויקט חדש בתוך קבוצה:
-    - team_id
-    - name
-    - quota_seconds (כמה שניות מוקצבות לפרויקט)
-    """
     try:
         body = await request.json()
         team_id = body.get("team_id")
@@ -356,50 +360,45 @@ async def project_create(request: Request):
         quota = body.get("quota_seconds", 0)
 
         if not all([team_id, name]):
-            return JSONResponse({"error": "חסר team_id או name"}, status_code=400)
+            return JSONResponse({"error": "team_id & name required"}, 400)
 
-        res = supabase.table("project").insert({
+        r = supabase.table("project").insert({
             "team_id": team_id,
             "name": name,
-            "quota_seconds": quota
+            "quota_seconds": quota,
         }).execute()
 
-        return JSONResponse({"status": "ok", "project": res.data[0]})
+        return {"status": "ok", "project": r.data[0]}
+
     except Exception as e:
         print("❌ /project/create:", e)
-        return JSONResponse({"error": str(e)}, status_code=500)
+        return JSONResponse({"error": str(e)}, 500)
 
 
 @app.post("/project/update-quota")
 async def project_update_quota(request: Request):
-    """
-    עדכון מכסת שניות לפרויקט
-    """
     try:
         body = await request.json()
         project_id = body.get("project_id")
         quota = body.get("quota_seconds")
 
         if not all([project_id, quota]):
-            return JSONResponse({"error": "חסר project_id או quota_seconds"}, status_code=400)
+            return JSONResponse({"error": "project_id & quota_seconds required"}, 400)
 
-        supabase.table("project").update({
-            "quota_seconds": quota
-        }).eq("id", project_id).execute()
+        supabase.table("project") \
+            .update({"quota_seconds": quota}) \
+            .eq("id", project_id) \
+            .execute()
 
-        return JSONResponse({"status": "ok"})
+        return {"status": "ok"}
+
     except Exception as e:
         print("❌ /project/update-quota:", e)
-        return JSONResponse({"error": str(e)}, status_code=500)
+        return JSONResponse({"error": str(e)}, 500)
 
 
 @app.get("/project/info")
 async def project_info(project_id: int):
-    """
-    מחזיר:
-    - פרטי פרויקט
-    - שימוש לפי משתמשים
-    """
     try:
         proj = (
             supabase.table("project")
@@ -410,55 +409,50 @@ async def project_info(project_id: int):
         ).data
 
         if not proj:
-            return JSONResponse({"error": "פרויקט לא נמצא"}, status_code=404)
+            return JSONResponse({"error": "project not found"}, 404)
 
         usage = (
             supabase.table("project_usage")
-            .select("user_email, seconds_used")
+            .select("*")
             .eq("project_id", project_id)
             .execute()
         ).data or []
 
-        return JSONResponse({
+        return {
             "project": proj,
-            "usage": usage
-        })
+            "usage": usage,
+        }
 
     except Exception as e:
         print("❌ /project/info:", e)
-        return JSONResponse({"error": str(e)}, status_code=500)  # ✅ Fixed: removed extra }
-# ───────────────────────────────────────────────
-# 🟥 BILLING RESOLVER — לוגיקת חיוב משולבת
-# ───────────────────────────────────────────────
+        return JSONResponse({"error": str(e)}, 500)
 
-def resolve_billing_mode(user_email: str) -> dict:
+
+###############################################################
+#                       BILLING RESOLVER
+###############################################################
+
+def resolve_billing_mode(email: str) -> dict:
     """
-    קובע האם המשתמש מחויב כ:
-    - personal   (טוקן אישי שלו)
-    - guest      (0.5$ fallback)
-    - team       (טוקן של ראש הקבוצה)
+    Determines:
+    - personal
+    - guest (fallback)
+    - team
 
-    מחזיר:
-    {
-      "mode": "personal" | "guest" | "team",
-      "team_id": int | None,
-      "project_id": int | None,
-      "token_to_use": str | None,
-      "using_fallback": bool,
-      "limit_seconds": float | None
-    }
+    Returns dictionary with:
+      mode, team_id, project_id, token_to_use, using_fallback
     """
 
     pref = (
         supabase.table("user_modes")
         .select("*")
-        .eq("user_email", user_email)
+        .eq("user_email", email)
         .maybe_single()
         .execute()
     ).data
 
-    # ברירת מחדל: אורח
     if not pref:
+        # NEW USER = GUEST
         return {
             "mode": "guest",
             "team_id": None,
@@ -470,19 +464,23 @@ def resolve_billing_mode(user_email: str) -> dict:
 
     mode = pref.get("preferred_mode", "guest")
 
-    # 1️⃣ מצב אישי
+    ############################################################
+    # PERSONAL MODE
+    ############################################################
     if mode == "personal":
-        token, use_fallback = get_user_token(user_email)
+        token, fallback = get_user_token(email)
         return {
             "mode": "personal",
             "team_id": None,
             "project_id": None,
             "token_to_use": token,
-            "using_fallback": use_fallback,
+            "using_fallback": fallback,
             "limit_seconds": None,
         }
 
-    # 2️⃣ מצב אורח
+    ############################################################
+    # GUEST (0.5$ free trial)
+    ############################################################
     if mode == "guest":
         return {
             "mode": "guest",
@@ -493,13 +491,15 @@ def resolve_billing_mode(user_email: str) -> dict:
             "limit_seconds": FALLBACK_LIMIT_DEFAULT,
         }
 
-    # 3️⃣ מצב קבוצה
+    ############################################################
+    # TEAM MODE
+    ############################################################
     if mode == "team":
         team_id = pref.get("active_team_id")
         project_id = pref.get("active_project_id")
 
         if not team_id:
-            # אין קבוצה → אורח
+            # fallback → guest
             return {
                 "mode": "guest",
                 "team_id": None,
@@ -510,8 +510,8 @@ def resolve_billing_mode(user_email: str) -> dict:
             }
 
         trow = (
-            supabase.table("team")
-            .select("owner_email, runpod_token_encrypted")
+            supabase.table("teams")
+            .select("*")
             .eq("id", team_id)
             .maybe_single()
             .execute()
@@ -530,7 +530,7 @@ def resolve_billing_mode(user_email: str) -> dict:
         enc = trow.get("runpod_token_encrypted")
 
         if not enc:
-            # לראש הקבוצה אין טוקן → נופל ל־fallback
+            # no team token → fallback
             return {
                 "mode": "team",
                 "team_id": team_id,
@@ -551,7 +551,9 @@ def resolve_billing_mode(user_email: str) -> dict:
             "limit_seconds": None,
         }
 
-    # הגנה
+    ############################################################
+    # Default = guest
+    ############################################################
     return {
         "mode": "guest",
         "team_id": None,
@@ -560,119 +562,150 @@ def resolve_billing_mode(user_email: str) -> dict:
         "using_fallback": True,
         "limit_seconds": FALLBACK_LIMIT_DEFAULT,
     }
-
-
-# ───────────────────────────────────────────────
-# 📌 תמלול — כעת לפי מצב המשתמש (פרטי / קבוצה / אורח)
-# ───────────────────────────────────────────────
+###############################################################
+#                   TRANSCRIPTION API
+###############################################################
 
 @app.post("/transcribe")
 async def transcribe(request: Request):
+    """
+    Unified transcription endpoint using:
+    - personal token
+    - team token
+    - guest fallback token
+    """
     try:
-        data = await request.json()
-        user_email = data.get("user_email")
+        body = await request.json()
+        user_email = body.get("user_email")
+        file_url = body.get("file_url")
 
         if not user_email:
-            return JSONResponse({"error": "user_email is required"}, status_code=400)
+            return JSONResponse({"error": "user_email is required"}, 400)
+        if not file_url:
+            return JSONResponse({"error": "file_url is required"}, 400)
 
         billing = resolve_billing_mode(user_email)
         token_to_use = billing["token_to_use"]
-        using_fallback = billing["using_fallback"]
 
         if not token_to_use:
-            return JSONResponse({
-                "error": "לא מוגדר טוקן לשימוש",
-                "mode": billing["mode"]
-            }, status_code=401)
+            return JSONResponse({"error": "No RunPod token available"}, 401)
 
-        # מגבלת אורח
+        # Guest limit check
         if billing["mode"] == "guest":
             allowed, used, limit = check_fallback_allowance(user_email)
             if not allowed:
                 return JSONResponse({
-                    "error": "חריגה ממגבלת אורח (0.5$)",
+                    "error": "Guest limit exceeded",
                     "used": used,
                     "limit": limit
-                }, status_code=402)
+                }, 402)
 
-        # הכנת בקשה לתמלול
-        run_body = data
-        if "input" not in data and data.get("file_url"):
-            run_body = {
-                "input": {
-                    "engine": "stable-whisper",
-                    "model": "ivrit-ai/whisper-large-v3-turbo-ct2",
-                    "transcribe_args": {
-                        "url": data["file_url"],
-                        "language": "he",
-                        "diarize": True,
-                        "vad": True,
-                        "word_timestamps": True,
-                    },
+        # Build request to RunPod
+        run_body = {
+            "input": {
+                "engine": "stable-whisper",
+                "model": "ivrit-ai/whisper-large-v3-turbo-ct2",
+                "transcribe_args": {
+                    "url": file_url,
+                    "language": "he",
+                    "word_timestamps": True,
+                    "diarize": True,
+                    "vad": True
                 }
             }
+        }
 
-        response = requests.post(
+        print(f"🚀 Running job on RunPod for user={user_email}, mode={billing['mode']}")
+
+        r = requests.post(
             "https://api.runpod.ai/v2/lco4rijwxicjyi/run",
-            headers={"Authorization": f"Bearer {token_to_use}", "Content-Type": "application/json"},
             json=run_body,
+            headers={"Authorization": f"Bearer {token_to_use}"},
             timeout=180,
         )
 
-        out = response.json() if response.content else {}
-        status_code = response.status_code or 200
-
+        out = r.json() if r.content else {}
         out["_billing"] = billing
 
-        print(f"🚀 /transcribe: user={user_email} mode={billing['mode']}")
-        return JSONResponse(out, status_code=status_code)
+        return JSONResponse(out, r.status_code)
 
     except Exception as e:
-        print("❌ /transcribe:", e)
-        return JSONResponse({"error": str(e)}, status_code=500)
+        print("❌ /transcribe error:", e)
+        return JSONResponse({"error": str(e)}, 500)
 
 
-# ───────────────────────────────────────────────
-# 📌 סטטוס — מעדכן חיוב לפי Personal / Guest / Team
-# ───────────────────────────────────────────────
+###############################################################
+#                 RUNPOD STATUS + BILLING
+###############################################################
+
+def estimate_cost_from_response(out: dict) -> float:
+    """
+    Extracts USD cost from RunPod COMPLETED job response.
+    """
+    try:
+        usage = out.get("executionTime") or out.get("metrics", {})
+        if isinstance(usage, (int, float)):
+            # assume seconds
+            seconds = usage
+        else:
+            seconds = usage.get("executionTime", 0)
+
+        return float(seconds) * RUNPOD_RATE_PER_SEC
+
+    except Exception:
+        return 0.0
+
 
 @app.get("/status/{job_id}")
-def get_job_status(job_id: str, user_email: str | None = None):
+def get_status(job_id: str, user_email: str | None = None):
+    """
+    Checks job status AND applies billing according to mode.
+    """
     try:
+        # token selection
         if not user_email:
             token, _ = get_user_token(None)
-            if not token:
-                return JSONResponse({"error": "Missing token"}, status_code=401)
             billing = None
         else:
             billing = resolve_billing_mode(user_email)
             token = billing["token_to_use"]
 
+        if not token:
+            return JSONResponse({"error": "Missing token"}, 401)
+
+        # Fetch from RunPod
         r = requests.get(
             f"https://api.runpod.ai/v2/lco4rijwxicjyi/status/{job_id}",
             headers={"Authorization": f"Bearer {token}"},
             timeout=30,
         )
-
         if not r.ok:
-            return JSONResponse({"error": "שגיאה בשליפת סטטוס מ-RunPod"}, status_code=r.status_code)
+            return JSONResponse({"error": "RunPod error"}, r.status_code)
 
         out = r.json()
 
-        # רק אם הושלם — מבצעים חיוב
+        # Not completed → no billing yet
         if not user_email or out.get("status") != "COMPLETED":
             return JSONResponse(out)
 
-        cost = estimate_cost_from_response(out)
-        seconds = cost / RUNPOD_RATE_PER_SEC
+        # Cost calculation
+        cost_usd = estimate_cost_from_response(out)
+        seconds = cost_usd / RUNPOD_RATE_PER_SEC
+        out["_cost_usd"] = cost_usd
+        out["_seconds"] = seconds
 
-        # אורח — fallback
-        if billing["mode"] == "guest":
-            new_used = add_fallback_usage(user_email, cost)
-            out["_usage"] = {"fallback_used": new_used}
+        ####################################################
+        # BILLING HANDLING
+        ####################################################
 
-        # קבוצה
-        elif billing["mode"] == "team":
+        # 1️⃣ Guest billing
+        if billing and billing["mode"] == "guest":
+            new_used = add_fallback_usage(user_email, cost_usd)
+            out["_billing_guest"] = {"used_now": new_used}
+
+        # 2️⃣ Team billing
+        elif billing and billing["mode"] == "team":
+            # team usage
             supabase.table("team_usage").insert({
                 "team_id": billing["team_id"],
                 "user_email": user_email,
@@ -680,7 +713,7 @@ def get_job_status(job_id: str, user_email: str | None = None):
                 "seconds_used": seconds,
             }).execute()
 
-            # אם חלק מפרויקט
+            # project usage (optional)
             if billing["project_id"]:
                 supabase.table("project_usage").insert({
                     "project_id": billing["project_id"],
@@ -688,32 +721,25 @@ def get_job_status(job_id: str, user_email: str | None = None):
                     "seconds_used": seconds,
                 }).execute()
 
-        # מצב אישי → אין לנו חיוב פנימי, RunPod מחייב ישירות
+        # 3️⃣ Personal has no internal billing. RunPod charges the user directly.
 
-        out["_cost_usd"] = cost
-        out["_seconds"] = seconds
         out["_mode"] = billing["mode"] if billing else None
-
         return JSONResponse(out)
 
     except Exception as e:
-        print("❌ /status error:", e)
-        return JSONResponse({"error": str(e)}, status_code=500)
-# ───────────────────────────────────────────────
-# 🟦 USER MODE API — שינוי מצב המשתמש
-# ───────────────────────────────────────────────
+        print("❌ /status ERROR:", e)
+        return JSONResponse({"error": str(e)}, 500)
+
+
+###############################################################
+#                     USER MODE API
+###############################################################
 
 @app.post("/user/set-mode")
 async def user_set_mode(request: Request):
     """
-    עדכון preferred_mode למשתמש:
-    "personal" | "guest" | "team"
-
-    בקשה:
-    {
-        "user_email": "...",
-        "mode": "guest" | "personal" | "team"
-    }
+    Allows user to select:
+      guest | personal | team
     """
     try:
         body = await request.json()
@@ -721,12 +747,11 @@ async def user_set_mode(request: Request):
         mode = body.get("mode")
 
         if not user_email or not mode:
-            return JSONResponse({"error": "user_email או mode חסרים"}, status_code=400)
+            return JSONResponse({"error": "user_email & mode required"}, 400)
 
         if mode not in ["guest", "personal", "team"]:
-            return JSONResponse({"error": "Mode לא חוקי"}, status_code=400)
+            return JSONResponse({"error": "Invalid mode"}, 400)
 
-        # בדיקה אם יש רשומה קיימת
         row = (
             supabase.table("user_modes")
             .select("*")
@@ -735,56 +760,46 @@ async def user_set_mode(request: Request):
             .execute()
         ).data
 
+        now = time.strftime("%Y-%m-%dT%H:%M:%S")
+
         if row:
             supabase.table("user_modes").update({
                 "preferred_mode": mode,
-                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S")
+                "updated_at": now
             }).eq("user_email", user_email).execute()
-
         else:
             supabase.table("user_modes").insert({
                 "user_email": user_email,
-                "preferred_mode": mode
+                "preferred_mode": mode,
+                "created_at": now,
+                "updated_at": now,
             }).execute()
 
-        return JSONResponse({"status": "ok", "mode": mode})
+        return {"status": "ok", "mode": mode}
 
     except Exception as e:
         print("❌ /user/set-mode:", e)
-        return JSONResponse({"error": str(e)}, status_code=500)
+        return JSONResponse({"error": str(e)}, 500)
 
-
-
-# ───────────────────────────────────────────────
-# 🟦 USER: עדכון קבוצה ופרויקט פעילים למשתמש
-# ───────────────────────────────────────────────
 
 @app.post("/user/set-team")
 async def user_set_team(request: Request):
     """
-    שינוי הקבוצה הפעילה של המשתמש.
-    
-    בקשה:
-    {
-        "user_email": "...",
-        "team_id": 123 | null,
-        "project_id": 456 | null
-    }
+    Select team + optional project
     """
     try:
         body = await request.json()
-        user_email = body.get("user_email")
+        email = body.get("user_email")
         team_id = body.get("team_id")
         project_id = body.get("project_id")
 
-        if not user_email:
-            return JSONResponse({"error": "user_email חסר"}, status_code=400)
+        if not email:
+            return JSONResponse({"error": "user_email required"}, 400)
 
-        # שולפים user_modes
         row = (
             supabase.table("user_modes")
             .select("*")
-            .eq("user_email", user_email)
+            .eq("user_email", email)
             .maybe_single()
             .execute()
         ).data
@@ -792,42 +807,29 @@ async def user_set_team(request: Request):
         updates = {
             "active_team_id": team_id,
             "active_project_id": project_id,
-            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S")
+            "preferred_mode": "team",
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         }
 
         if row:
-            supabase.table("user_modes").update(updates).eq("user_email", user_email).execute()
+            supabase.table("user_modes").update(updates).eq("user_email", email).execute()
         else:
             supabase.table("user_modes").insert({
-                "user_email": user_email,
-                "preferred_mode": "team",   # אם בוחר קבוצה → מצב user הופך team
-                "active_team_id": team_id,
-                "active_project_id": project_id
+                "user_email": email,
+                **updates,
             }).execute()
 
-        return JSONResponse({"status": "ok"})
+        return {"status": "ok"}
 
     except Exception as e:
-        print("❌ /user/set-team error:", e)
-        return JSONResponse({"error": str(e)}, status_code=500)
+        print("❌ /user/set-team:", e)
+        return JSONResponse({"error": str(e)}, 500)
 
-
-
-# ───────────────────────────────────────────────
-# 🟦 USER: שליפת מצב משתמש מלא (לקליינט)
-# ───────────────────────────────────────────────
 
 @app.get("/user/mode")
 async def user_get_mode(user_email: str):
     """
-    מחזיר:
-    {
-        preferred_mode,
-        active_team_id,
-        active_project_id,
-        team_info?,
-        project_info?
-    }
+    Returns full current mode with optional team/project info
     """
     try:
         row = (
@@ -839,48 +841,43 @@ async def user_get_mode(user_email: str):
         ).data
 
         if not row:
-            return JSONResponse({
+            return {
                 "preferred_mode": "guest",
                 "active_team_id": None,
-                "active_project_id": None
-            })
+                "active_project_id": None,
+            }
 
         resp = {
             "preferred_mode": row.get("preferred_mode"),
             "active_team_id": row.get("active_team_id"),
-            "active_project_id": row.get("active_project_id")
+            "active_project_id": row.get("active_project_id"),
         }
 
-        # מוסיפים מידע על קבוצה
         if row.get("active_team_id"):
-            team = (
-                supabase.table("team")
+            resp["team"] = (
+                supabase.table("teams")
                 .select("id, name, owner_email")
                 .eq("id", row["active_team_id"])
                 .maybe_single()
                 .execute()
             ).data
-            resp["team"] = team
 
-        # מוסיפים מידע על פרויקט
         if row.get("active_project_id"):
-            proj = (
+            resp["project"] = (
                 supabase.table("project")
                 .select("id, name, quota_seconds")
                 .eq("id", row["active_project_id"])
                 .maybe_single()
                 .execute()
             ).data
-            resp["project"] = proj
 
-        return JSONResponse(resp)
+        return resp
 
     except Exception as e:
-        print("❌ /user/mode error:", e)
-        return JSONResponse({"error": str(e)}, status_code=500)
+        print("❌ /user/mode:", e)
+        return JSONResponse({"error": str(e)}, 500)
 
 
-
-# ───────────────────────────────────────────────
-# ✨ END OF FILE
-# ───────────────────────────────────────────────
+###############################################################
+#                       END OF FILE
+###############################################################
