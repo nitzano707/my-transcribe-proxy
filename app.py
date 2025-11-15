@@ -11,7 +11,7 @@ from Crypto.Util.Padding import unpad
 # ───────────────────────────────────────────────
 app = FastAPI()
 
-# ✅ CORS – פתוח לכל, אפשר לצמצם בהמשך אם תרצה
+# ✅ CORS – פתוח לכל
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -25,8 +25,8 @@ app.add_middleware(
 RUNPOD_TOKEN = os.getenv("RUNPOD_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
-RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY")
+ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")       
+RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY")      
 FALLBACK_LIMIT_DEFAULT = float(os.getenv("FALLBACK_LIMIT_DEFAULT", "0.1"))
 RUNPOD_RATE_PER_SEC = float(os.getenv("RUNPOD_RATE_PER_SEC", "0.0002"))
 
@@ -36,9 +36,8 @@ BASE_URL = "https://my-transcribe-proxy.onrender.com"
 
 # חיבור ל-Supabase
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
 # ───────────────────────────────────────────────
-
-
 def delete_later(path, delay=3600):
     def _delete():
         time.sleep(delay)
@@ -47,13 +46,11 @@ def delete_later(path, delay=3600):
             print(f"[Auto Delete] נמחק הקובץ: {path}")
     threading.Thread(target=_delete, daemon=True).start()
 
-
 @app.api_route("/ping", methods=["GET", "HEAD"])
 async def ping():
     return JSONResponse({"status": "ok"})
 
-
-# 🧩 פענוח AES
+# 🧩 פענוח AES (לטוקן אישי בלבד)
 def decrypt_token(encrypted_token: str) -> str | None:
     try:
         if not ENCRYPTION_KEY:
@@ -64,10 +61,11 @@ def decrypt_token(encrypted_token: str) -> str | None:
         cipher = AES.new(key[:32], AES.MODE_CBC, iv)
         decrypted = unpad(cipher.decrypt(ciphertext), AES.block_size)
         return decrypted.decode("utf-8")
-    except:
+    except Exception as e:
+        print(f"❌ שגיאה בפענוח טוקן: {e}")
         return None
 
-
+# 🔎 שליפת חשבון
 def get_account(user_email: str):
     res = (
         supabase.table("accounts")
@@ -78,8 +76,8 @@ def get_account(user_email: str):
     )
     return res.data if hasattr(res, "data") else None
 
-
-def get_user_token(user_email: str | None):
+# 🔑 שליפת טוקן (אישי או fallback)
+def get_user_token(user_email: str | None) -> tuple[str | None, bool]:
     try:
         if not user_email:
             if RUNPOD_API_KEY:
@@ -89,56 +87,111 @@ def get_user_token(user_email: str | None):
         row = get_account(user_email)
         enc = row.get("runpod_token_encrypted") if row else None
 
+        # טוקן אישי
         if enc:
             token = decrypt_token(enc)
             if token:
-                return token, False
+                return token, False  
 
+        # fallback גלובלי
         if RUNPOD_API_KEY:
             return RUNPOD_API_KEY, True
 
         return None, True
-    except:
+    except Exception as e:
+        print(f"❌ שגיאה בשליפת טוקן: {e}")
         return (RUNPOD_API_KEY if RUNPOD_API_KEY else None), True
 
-
-def check_fallback_allowance(user_email: str):
+# בדיקת מגבלת fallback
+def check_fallback_allowance(user_email: str) -> tuple[bool, float, float]:
     row = get_account(user_email)
     if not row:
-        supabase.table("accounts").insert({
+        payload = {
             "user_email": user_email,
             "used_credits": 0.0,
             "limit_credits": FALLBACK_LIMIT_DEFAULT,
-        }).execute()
+        }
+        supabase.table("accounts").insert(payload).execute()
         return True, 0.0, FALLBACK_LIMIT_DEFAULT
 
     used = float(row.get("used_credits") or 0.0)
     limit = float(row.get("limit_credits") or FALLBACK_LIMIT_DEFAULT)
     return (used < limit), used, limit
 
-
-def add_fallback_usage(user_email: str, amount: float):
+# עדכון שימוש fallback
+def add_fallback_usage(user_email: str, amount_usd: float):
     row = get_account(user_email)
     used = float((row or {}).get("used_credits") or 0.0)
-    new_used = round(used + amount, 6)
+    new_used = round(used + amount_usd, 6)
     supabase.table("accounts").update({"used_credits": new_used}).eq("user_email", user_email).execute()
     return new_used
 
-
+# הערכת עלות מ-executionTime
 def estimate_cost_from_response(resp_json: dict) -> float:
     try:
         ms = 0
         if "executionTime" in resp_json:
             ms = resp_json.get("executionTime") or 0
+        if not ms and isinstance(resp_json.get("output"), dict):
+            ms = resp_json["output"].get("executionTime") or 0
+        if not ms and isinstance(resp_json.get("output"), list) and resp_json["output"]:
+            first = resp_json["output"][0]
+            ms = first.get("executionTime") or 0
+
         seconds = float(ms) / 1000.0
-        return round(seconds * RUNPOD_RATE_PER_SEC, 8)
-    except:
+        cost = seconds * RUNPOD_RATE_PER_SEC
+
+        if cost > 0:
+            print(f"⏱ זמן עיבוד כולל: {seconds:.2f} שניות → עלות מוערכת: {cost:.8f}$")
+        else:
+            print("⚠️ זמן עיבוד לא זוהה בתגובה של RunPod:", resp_json.keys())
+
+        return round(cost, 8)
+    except Exception as e:
+        print(f"❌ שגיאה ב-estimate_cost_from_response: {e}")
         return 0.0
 
+# שליפת יתרה אמיתית מ-RunPod
+def get_real_runpod_balance(token: str) -> tuple[float, bool]:
+    try:
+        payload = {
+            "query": "{ myself { clientBalance hostBalance } }"
+        }
+        r = requests.post(
+            "https://api.runpod.io/graphql",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=10,
+        )
 
+        if not r.ok:
+            print(f"❌ GraphQL account fetch failed: status={r.status_code}, body={r.text}")
+            return 0.0, False
+
+        data = r.json() or {}
+        if "errors" in data:
+            print(f"❌ GraphQL errors: {data['errors']}")
+            return 0.0, False
+
+        myself = (data.get("data") or {}).get("myself") or None
+        if not myself or "clientBalance" not in myself:
+            print(f"❌ GraphQL response missing clientBalance: {data}")
+            return 0.0, False
+
+        bal = float(myself.get("clientBalance", 0.0))
+        return bal, True
+    except Exception as e:
+        print(f"❌ Error parsing GraphQL balance: {e}")
+        return 0.0, False
 # ───────────────────────────────────────────────
 @app.post("/upload")
 async def upload_file(request: Request, file: UploadFile = File(None)):
+    """
+    מקבל קובץ מהקליינט, שומר זמנית בשרת ומחזיר URL גישה.
+    """
     try:
         filename, content = None, None
         if file:
@@ -146,55 +199,121 @@ async def upload_file(request: Request, file: UploadFile = File(None)):
         else:
             body = await request.body()
             if body:
-                filename = f"upload_{int(time.time())}.bin"
-                content = body
-
+                filename, content = f"upload_{int(time.time())}.bin", body
         if not content:
             return JSONResponse({"error": "לא התקבל קובץ תקין."}, status_code=400)
 
-        path = os.path.join(UPLOAD_DIR, filename)
-        with open(path, "wb") as f:
+        file_path = os.path.join(UPLOAD_DIR, filename)
+        with open(file_path, "wb") as f:
             f.write(content)
-
-        delete_later(path)
-
-        return JSONResponse({
-            "url": f"{BASE_URL}/files/{quote(filename)}",
-            "message": "הקובץ הועלה בהצלחה ויימחק תוך שעה."
-        })
+        delete_later(file_path)
+        encoded_filename = quote(filename)
+        file_url = f"{BASE_URL}/files/{encoded_filename}"
+        return JSONResponse({"url": file_url, "message": "הקובץ הועלה בהצלחה ויימחק תוך שעה."})
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+        return JSONResponse({"error": f"שגיאה בעת העלאת הקובץ: {str(e)}"}, status_code=500)
 
 
 @app.get("/files/{filename}")
 async def get_file(filename: str):
-    decoded = unquote(filename)
-    path = os.path.join(UPLOAD_DIR, decoded)
-    if os.path.exists(path):
-        return FileResponse(path)
+    decoded_filename = unquote(filename)
+    file_path = os.path.join(UPLOAD_DIR, decoded_filename)
+    if os.path.exists(file_path):
+        return FileResponse(file_path)
     return JSONResponse({"error": "הקובץ נמחק או לא נמצא."}, status_code=404)
+
+
+# ───────────────────────────────────────────────
+# 📥 שליפת קובץ מדרייב לשרת (לתמלול)
+@app.get("/fetch-and-store-audio")
+async def fetch_and_store_audio(request: Request, file_id: str):
+    """
+    שולף קובץ מדרייב, שומר זמנית, מחזיר URL.
+    תומך ב-Authorization header עם Bearer token.
+    """
+    try:
+        auth_header = request.headers.get("Authorization")
+        if not auth_header or not auth_header.startswith("Bearer "):
+            return JSONResponse({"error": "חסר access token של Google"}, status_code=400)
+
+        token = auth_header.split("Bearer ")[1]
+        headers = {"Authorization": f"Bearer {token}"}
+        drive_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
+
+        res = requests.get(drive_url, headers=headers, stream=True)
+        if not res.ok:
+            return JSONResponse({"error": f"שגיאה בשליפת קובץ מדרייב: {res.text}"}, status_code=res.status_code)
+
+        content_type = res.headers.get("Content-Type", "application/octet-stream")
+        ext_map = {
+            "audio/mp4": ".m4a",
+            "audio/x-m4a": ".m4a",
+            "audio/mpeg": ".mp3",
+            "audio/wav": ".wav",
+            "video/mp4": ".mp4",
+        }
+        ext = ext_map.get(content_type, ".audio")
+
+        filename = f"drive_{file_id}_{int(time.time())}{ext}"
+        file_path = os.path.join(UPLOAD_DIR, filename)
+
+        with open(file_path, "wb") as f:
+            for chunk in res.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+        delete_later(file_path)
+        file_url = f"{BASE_URL}/files/{quote(filename)}"
+        print(f"✅ נשמר קובץ מדרייב: {file_path} ({content_type})")
+        return JSONResponse({"url": file_url})
+
+    except Exception as e:
+        print(f"❌ /fetch-and-store-audio error: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 # ───────────────────────────────────────────────
 @app.post("/transcribe")
 async def transcribe(request: Request):
+    """
+    שליחת בקשת תמלול ל-RunPod.
+
+    ⚠️ שים לב:
+    - כאן **לא** מחויבים קרדיטים.
+    - החיוב נעשה רק ב-/status כשהסטטוס COMPLETED ויש executionTime.
+    """
     try:
         data = await request.json()
         user_email = data.get("user_email")
         if not user_email:
             return JSONResponse({"error": "user_email is required"}, status_code=400)
 
+        # 🔑 שליפת טוקן (אישי או fallback)
         token_to_use, using_fallback = get_user_token(user_email)
 
+        if not token_to_use:
+            return JSONResponse(
+                {
+                    "error": "לא הוגדר טוקן לשימוש (אין טוקן אישי ואין RUNPOD_API_KEY בשרת).",
+                    "action": "יש להזין טוקן RunPod אישי"
+                },
+                status_code=401,
+            )
+
+        # 🔒 בדיקת מגבלת שימוש (רק למשתמשים על fallback)
         if using_fallback:
             allowed, used, limit = check_fallback_allowance(user_email)
             if not allowed:
-                return JSONResponse({
-                    "error": "חריגה ממגבלת שימוש",
-                    "used": used,
-                    "limit": limit
-                }, status_code=402)
+                return JSONResponse(
+                    {
+                        "error": "חריגה ממגבלת שימוש",
+                        "used": used,
+                        "limit": limit,
+                        "action": "יש להזין טוקן RunPod אישי"
+                    },
+                    status_code=402,
+                )
 
+        # 🎯 בניית גוף הבקשה ל-RunPod
         run_body = data
         if "input" not in data and data.get("file_url"):
             run_body = {
@@ -211,19 +330,23 @@ async def transcribe(request: Request):
                 }
             }
 
-        r = requests.post(
+        # 🚀 שליחה ל-RunPod (asynchronous run)
+        response = requests.post(
             "https://api.runpod.ai/v2/lco4rijwxicjyi/run",
-            headers={"Authorization": f"Bearer {token_to_use}"},
+            headers={"Authorization": f"Bearer {token_to_use}", "Content-Type": "application/json"},
             json=run_body,
             timeout=180,
         )
 
-        out = r.json() if r.content else {}
-        print(f"🚀 /transcribe → user={user_email}, using_fallback={using_fallback}")
+        out = response.json() if response.content else {}
+        status_code = response.status_code if response.status_code else 200
 
-        return JSONResponse(content=out, status_code=r.status_code)
+        print(f"🚀 /transcribe → user={user_email}, using_fallback={using_fallback}, resp_keys={list(out.keys())}")
+        return JSONResponse(content=out, status_code=status_code)
+
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500})
+        print(f"❌ /transcribe error: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
 # ───────────────────────────────────────────────
 @app.get("/status/{job_id}")
 def get_job_status(job_id: str, user_email: str | None = None):
@@ -235,7 +358,7 @@ def get_job_status(job_id: str, user_email: str | None = None):
         # 🔑 שליפת טוקן לשימוש
         # ───────────────────────────────────────────
         if not user_email:
-            token_to_use, using_fallback = get_user_token(None)
+            token_to_use, _ = get_user_token(None)
         else:
             token_to_use, using_fallback = get_user_token(user_email)
 
@@ -256,25 +379,17 @@ def get_job_status(job_id: str, user_email: str | None = None):
         out = r.json() if r.content else {}
         print("🔍 RAW RunPod response:", out)
 
-        # ───────────────────────────────────────────
-        # 🧩 נרמול הסטטוס כדי לתפוס את כל הצורות של COMPLETED
-        # ───────────────────────────────────────────
-        status_raw = str(out.get("status", "")).strip().lower()
-
-        valid_completed_values = {
-            "completed",     # תקין
-            "compleded",     # שגיאת כתיב של RunPod
-            "complete",      # לפעמים בלי d
-            "done"           # חלק מהמודלים
-        }
-
-        is_completed = status_raw in valid_completed_values
+        status_lower = str(out.get("status", "")).lower()
 
         # ───────────────────────────────────────────
-        # 📘 עדכון קרדיטים fallback
+        # 📘 עדכון קרדיטים למשתמש fallback
         # ───────────────────────────────────────────
-        if user_email and using_fallback and is_completed:
-
+        if (
+            user_email
+            and "using_fallback" in locals()
+            and using_fallback
+            and status_lower == "completed"
+        ):
             cost = estimate_cost_from_response(out)
             if cost > 0:
                 new_used = add_fallback_usage(user_email, cost)
@@ -291,95 +406,115 @@ def get_job_status(job_id: str, user_email: str | None = None):
                     f"(total {new_used:.6f}$, remaining {remaining:.6f}$)"
                 )
             else:
-                print("⚖️ עלות לא אותרה / 0 בתגובה של RunPod.")
+                print("⚖️ עלות לא אותרה או אפסית בתגובה של RunPod.")
 
         # ───────────────────────────────────────────
-        # 🗄 עדכון רשומת תמלול ב-DB
+        # 🗄 עדכון רשומת התמלול במסד הנתונים
         # ───────────────────────────────────────────
-        if is_completed:
-
-            # 1️⃣ שליפת רשומה לפי job_id
+        if status_lower == "completed":
+            # 1️⃣ שליפת מזהה הרשומה (record_id) לפי job_id
             rec = (
                 supabase.table("transcriptions")
-                .select("id, audio_length_seconds")
+                .select("id")
                 .eq("job_id", job_id)
                 .maybe_single()
                 .execute()
             )
             record = rec.data if hasattr(rec, "data") else None
-            if not record:
-                print("⚠️ לא נמצאה רשומת DB עבור job_id:", job_id)
-                return JSONResponse(content=out, status_code=200)
 
-            record_id = record["id"]
+            if record and record.get("id"):
+                record_id = record["id"]
 
-            # 2️⃣ זמן עיבוד בפועל
-            exec_ms = out.get("executionTime", 0)
-            exec_sec = float(exec_ms) / 1000.0
+                # 2️⃣ זמן עיבוד בפועל
+                exec_ms = out.get("executionTime", 0)
+                exec_sec = float(exec_ms) / 1000.0
 
-            # 3️⃣ חילוץ אורך אודיו מתוך result
-            audio_len = None
-            try:
-                outputs = out.get("output") or []
-                if isinstance(outputs, list) and len(outputs) > 0:
-                    last_segment = outputs[0]["result"][-1][-1]
-                    audio_len = float(last_segment.get("end", 0.0))
-                    print(f"📏 אורך אודיו מ-RunPod: {audio_len:.2f} שניות")
-            except Exception as e:
-                print("⚠️ שגיאה בחילוץ אורך אודיו:", e)
+                # ⭐⭐ 3️⃣ שליפת אורך האודיו מתוך RunPod ⭐⭐
+                audio_len = None
+                try:
+                    outputs = out.get("output") or []
+                    if isinstance(outputs, list) and len(outputs) > 0:
+                        final_segment = outputs[0]["result"][-1][-1]
+                        audio_len = float(final_segment.get("end", 0.0))
+                        print(f"📏 אורך אודיו מ-RunPod: {audio_len:.2f} שניות")
+                except Exception as e:
+                    print("⚠️ לא ניתן לחלץ אורך אודיו מ-RunPod:", e)
 
-            # fallback → DB
-            if not audio_len or audio_len == 0:
-                audio_len = float(record.get("audio_length_seconds") or 0.0)
-                print(f"📏 אורך אודיו נשלף מה-DB: {audio_len}")
+                # אם לא נמצא → נסה לשלוף מה-DB
+                if not audio_len or audio_len == 0:
+                    try:
+                        db_record = (
+                            supabase.table("transcriptions")
+                            .select("audio_length_seconds")
+                            .eq("id", record_id)
+                            .maybe_single()
+                            .execute()
+                        )
+                        if (
+                            db_record.data
+                            and db_record.data.get("audio_length_seconds")
+                        ):
+                            audio_len = float(db_record.data["audio_length_seconds"])
+                            print(f"📏 אורך אודיו מ-DB: {audio_len:.2f} שניות")
+                    except Exception as e:
+                        print("⚠️ לא ניתן לשלוף אורך מה-DB:", e)
 
-            # יחס עיבוד
-            ratio = exec_sec / audio_len if audio_len > 0 else None
+                audio_len = audio_len or 0.0
 
-            # חיוב (0.00016)
-            billing = exec_sec * 0.00016
+                # ⭐⭐ 4️⃣ יחס עיבוד ⭐⭐
+                ratio = exec_sec / audio_len if audio_len > 0 else None
 
-            # זמן boot
-            delay_ms = out.get("delayTime", 0)
-            boot_sec = float(delay_ms) / 1000.0
+                # ⭐⭐ 5️⃣ חיוב ⭐⭐
+                billing = exec_sec * 0.00016
 
-            # משוער (8%)
-            estimated = audio_len * 0.08 if audio_len > 0 else None
+                # ⭐⭐ 6️⃣ זמן boot של ה-Worker ⭐⭐
+                delay_ms = out.get("delayTime", 0)
+                boot_sec = float(delay_ms) / 1000.0
 
-            updates = {
-                "audio_length_seconds": audio_len,
-                "estimated_processing_seconds": estimated,
-                "actual_processing_seconds": exec_sec,
-                "billing_usd": billing,
-                "processing_ratio": ratio,
-                "worker_boot_time_seconds": boot_sec,
-                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            }
+                # ⭐⭐ 7️⃣ זמן עיבוד משוער (8%) ⭐⭐
+                estimated = audio_len * 0.08 if audio_len > 0 else None
 
-            supabase.table("transcriptions").update(updates).eq("id", record_id).execute()
-            print(f"🗄 נתוני תמלול עודכנו ב-DB עבור הרשומה {record_id}")
+                # ⭐⭐ 8️⃣ עדכון במסד ⭐⭐
+                updates = {
+                    "audio_length_seconds": audio_len,
+                    "estimated_processing_seconds": estimated,
+                    "actual_processing_seconds": exec_sec,
+                    "billing_usd": billing,
+                    "processing_ratio": ratio,
+                    "worker_boot_time_seconds": boot_sec,
+                    "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }
+
+                supabase.table("transcriptions").update(updates).eq("id", record_id).execute()
+
+                print(f"🗄 נתוני תמלול עודכנו ב-DB עבור הרשומה {record_id}")
 
         # ───────────────────────────────────────────
-        # החזרת תגובת RunPod
+        # החזרת תשובת RunPod כפי שהיא
         # ───────────────────────────────────────────
         return JSONResponse(content=out, status_code=r.status_code)
 
     except Exception as e:
         print(f"❌ /status error: {e}")
-        return JSONResponse({"error": str(e)}, status_code=500})
+        return JSONResponse({"error": str(e)}, status_code=500)
 # ───────────────────────────────────────────────
 @app.get("/effective-balance")
 def effective_balance(user_email: str):
     """
     מחזיר יתרה אפקטיבית למשתמש.
-    - אם המשתמש לא קיים → נוצרת רשומה fallback חדשה.
-    - אם יש טוקן מוצפן אישי → נבדקת היתרה האמיתית ב-RunPod.
-    - אם הטוקן האישי שגוי → נמחק ועוברים ל-fallback.
+
+    - אם המשתמש לא קיים → נוצרת רשומת fallback חדשה (used_credits=0, limit_credits=FALLBACK_LIMIT_DEFAULT).
+    - אם יש טוקן מוצפן אישי → נבדקת היתרה האמיתית ב-RunPod (GraphQL account API).
+      אם הטוקן האישי **לא תקין** → מוחקים אותו, עוברים ל-fallback ומחזירים need_token=True.
+    - אחרת → נעשה שימוש ביתרת fallback (limit - used_credits).
+
+    תמיד מחזירים balance כמחרוזת בפורמט עם 6 ספרות עשרוניות.
     """
     try:
+        # 🟢 בדיקה אם המשתמש כבר קיים במסד
         row = get_account(user_email)
 
-        # 🆕 אין רשומה למשתמש – יצירה כ-fallback
+        # 🆕 אם אין רשומה – צור חדשה כ-fallback בלבד (בלי טוקן מוצפן)
         if not row:
             payload = {
                 "user_email": user_email,
@@ -387,40 +522,50 @@ def effective_balance(user_email: str):
                 "limit_credits": FALLBACK_LIMIT_DEFAULT,
             }
             supabase.table("accounts").insert(payload).execute()
-            bal = f"{FALLBACK_LIMIT_DEFAULT:.6f}"
-            print(f"💰 יתרה נוכחית של {user_email}: {bal}$ (new fallback)")
-            return JSONResponse({"balance": bal, "need_token": False})
+            balance_str = f"{FALLBACK_LIMIT_DEFAULT:.6f}"
+            print(f"💰 יתרה נוכחית של {user_email}: {balance_str}$ (new fallback account)")
+            return JSONResponse({
+                "balance": balance_str,
+                "need_token": False
+            })
 
-        # 🔐 יש טוקן אישי מוצפן
+        # 🪙 אם יש טוקן מוצפן – נבדוק יתרה אמיתית בחשבון RunPod (GraphQL)
         enc = row.get("runpod_token_encrypted")
         if enc:
             token = decrypt_token(enc)
             if token:
                 bal, valid = get_real_runpod_balance(token)
-                if valid:
-                    bal_str = f"{bal:.6f}"
-                    print(f"💰 יתרה נוכחית של {user_email}: {bal_str}$ (personal token)")
-                    return JSONResponse({"balance": bal_str, "need_token": False})
-                else:
-                    # טוקן אישי לא תקין → מחיקה וחזרה ל-fallback
-                    print(f"⚠️ טוקן אישי לא תקין עבור {user_email} – מעבר ל-fallback.")
-                    supabase.table("accounts").update({
-                        "runpod_token_encrypted": None,
-                        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                    }).eq("user_email", user_email).execute()
 
-        # 🪙 fallback
+                if valid:
+                    balance_str = f"{bal:.6f}"
+                    print(f"💰 יתרה נוכחית של {user_email}: {balance_str}$ (personal token)")
+                    return JSONResponse({
+                        "balance": balance_str,
+                        "need_token": False
+                    })
+                else:
+                    # 🔴 טוקן אישי לא תקין → מוחקים אותו ועוברים למצב fallback
+                    print(f"⚠️ טוקן אישי לא תקין עבור {user_email} – מעבר ל-fallback ומבוקש טוקן חדש.")
+                    supabase.table("accounts").update(
+                        {
+                            "runpod_token_encrypted": None,
+                            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        }
+                    ).eq("user_email", user_email).execute()
+                    # נמשיך מטה לחישוב fallback
+
+        # 🧮 חישוב יתרת fallback
         used = float(row.get("used_credits") or 0.0)
         limit = float(row.get("limit_credits") or FALLBACK_LIMIT_DEFAULT)
         remaining = max(limit - used, 0.0)
-        bal_str = f"{remaining:.6f}"
+        balance_str = f"{remaining:.6f}"
 
-        print(f"💰 יתרה נוכחית של {user_email}: {bal_str}$ (fallback)")
+        print(f"💰 יתרה נוכחית של {user_email}: {balance_str}$ (fallback)")
         need_token_flag = remaining <= 0 or (enc is not None)
 
         return JSONResponse({
-            "balance": bal_str,
-            "need_token": need_token_flag,
+            "balance": balance_str,
+            "need_token": need_token_flag
         })
 
     except Exception as e:
@@ -428,25 +573,31 @@ def effective_balance(user_email: str):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
-
 # ───────────────────────────────────────────────
-# ניהול תמלולים מאובטח
+# 🧱 ניהול תמלולים מאובטח דרך השרת
 @app.post("/db/transcriptions/create")
 async def create_transcription(request: Request):
     try:
         body = await request.json()
+        user_email = body.get("user_email")
+        alias = body.get("alias")
+        folder_id = body.get("folder_id")
+        audio_id = body.get("audio_id")
+        media_type = body.get("media_type", "audio")
+
         res = supabase.table("transcriptions").insert({
-            "user_email": body.get("user_email"),
-            "alias": body.get("alias"),
-            "folder_id": body.get("folder_id"),
-            "audio_id": body.get("audio_id"),
-            "media_type": body.get("media_type", "audio")
+            "user_email": user_email,
+            "alias": alias,
+            "folder_id": folder_id,
+            "audio_id": audio_id,
+            "media_type": media_type
         }).execute()
+
         return JSONResponse({"status": "ok", "data": res.data})
+
     except Exception as e:
         print("❌ /db/transcriptions/create:", e)
         return JSONResponse({"error": str(e)}, status_code=500)
-
 
 
 @app.post("/db/transcriptions/update")
@@ -456,34 +607,51 @@ async def update_transcription(request: Request):
         id = body.get("id")
         updates = body.get("updates", {})
 
+        # 🕒 תמיד מעדכן זמן
         updates["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
 
+        # 🎵 שמירת אורך האודיו (אם קיים)
         if "audio_length_seconds" in updates:
-            try: updates["audio_length_seconds"] = float(updates["audio_length_seconds"])
-            except: pass
+            try:
+                updates["audio_length_seconds"] = float(updates["audio_length_seconds"])
+            except:
+                pass
 
+        # ⏱️ זמן עיבוד משוער
         if "estimated_processing_seconds" in updates:
-            try: updates["estimated_processing_seconds"] = float(updates["estimated_processing_seconds"])
-            except: pass
+            try:
+                updates["estimated_processing_seconds"] = float(updates["estimated_processing_seconds"])
+            except:
+                pass
 
+        # 🧾 שמירת גודל קובץ
         if "file_size_bytes" in updates:
-            try: updates["file_size_bytes"] = int(updates["file_size_bytes"])
-            except: pass
+            try:
+                updates["file_size_bytes"] = int(updates["file_size_bytes"])
+            except:
+                pass
 
+        # 🆔 שמירת job_id
         if "job_id" in updates:
             updates["job_id"] = updates["job_id"]
 
-        res = supabase.table("transcriptions").update(updates).eq("id", id).execute()
+        res = (
+            supabase.table("transcriptions")
+            .update(updates)
+            .eq("id", id)
+            .execute()
+        )
+
         return JSONResponse({"status": "ok", "data": res.data})
 
     except Exception as e:
         print("❌ /db/transcriptions/update:", e)
         return JSONResponse({"error": str(e)}, status_code=500)
-
-
-
 @app.get("/db/transcriptions/get")
 def get_transcription(id: str):
+    """
+    שולף רשומת תמלול בודדת לפי ID
+    """
     try:
         result = (
             supabase.table("transcriptions")
@@ -492,14 +660,15 @@ def get_transcription(id: str):
             .maybe_single()
             .execute()
         )
+
         if result.data:
-            return JSONResponse(result.data)
-        return JSONResponse({"error": "רשומה לא נמצאה"}, status_code=404)
+            return JSONResponse(content=result.data, status_code=200)
+        else:
+            return JSONResponse({"error": "רשומה לא נמצאה"}, status_code=404)
 
     except Exception as e:
         print(f"❌ /db/transcriptions/get: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
-
 
 
 @app.post("/db/transcriptions/delete")
@@ -507,12 +676,13 @@ async def delete_transcription(request: Request):
     try:
         body = await request.json()
         id = body.get("id")
+
         supabase.table("transcriptions").delete().eq("id", id).execute()
         return JSONResponse({"status": "deleted", "id": id})
+
     except Exception as e:
         print("❌ /db/transcriptions/delete:", e)
         return JSONResponse({"error": str(e)}, status_code=500)
-
 
 
 # ───────────────────────────────────────────────
@@ -520,6 +690,11 @@ async def delete_transcription(request: Request):
 async def save_token(request: Request):
     """
     שומר טוקן RunPod אישי מוצפן למשתמש ב-Supabase.
+
+    מרגע שיש טוקן אישי:
+    - לא משתמשים יותר ב-RUNPOD_API_KEY עבורו.
+    - לא מגבילים אותו לפי FALLBACK_LIMIT_DEFAULT (החיוב ב-RunPod עליו).
+    - מתבצעת בדיקת תקינות מול RunPod (GraphQL) לפני השמירה.
     """
     try:
         data = await request.json()
@@ -532,44 +707,52 @@ async def save_token(request: Request):
         if not ENCRYPTION_KEY:
             return JSONResponse({"error": "ENCRYPTION_KEY לא מוגדר בשרת"}, status_code=500)
 
-        # בדיקת תקינות מול RunPod
-        bal, valid = get_real_runpod_balance(token)
+        # ✔️ בדיקת תקינות טוקן מול RunPod (כולל clientBalance)
+        balance, valid = get_real_runpod_balance(token)
         if not valid:
-            return JSONResponse({"error": "טוקן RunPod שגוי"}, status_code=400)
+            return JSONResponse({"error": "טוקן RunPod שגוי או לא מורשה"}, status_code=400)
 
-        # הצפנה
+        # ✔️ הצפנה (AES-CBC + padding)
         key = ENCRYPTION_KEY.encode("utf-8")
         iv = os.urandom(16)
         cipher = AES.new(key[:32], AES.MODE_CBC, iv)
-        pad = AES.block_size - len(token.encode()) % AES.block_size
-        padded = token.encode() + bytes([pad]) * pad
+
+        padding_len = AES.block_size - len(token.encode()) % AES.block_size
+        padded = token.encode() + bytes([padding_len]) * padding_len
         encrypted = base64.b64encode(iv + cipher.encrypt(padded)).decode()
 
+        # ✔️ שמירה ב-DB
         row = get_account(user_email)
         if row:
-            supabase.table("accounts").update({
-                "runpod_token_encrypted": encrypted,
-                "used_credits": 0.0,
-                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            }).eq("user_email", user_email).execute()
+            supabase.table("accounts").update(
+                {
+                    "runpod_token_encrypted": encrypted,
+                    "used_credits": 0.0,  # איפוס fallback — מרגע זה החיוב עובר למשתמש
+                    "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }
+            ).eq("user_email", user_email).execute()
         else:
-            supabase.table("accounts").insert({
-                "user_email": user_email,
-                "runpod_token_encrypted": encrypted,
-                "used_credits": 0.0,
-                "limit_credits": FALLBACK_LIMIT_DEFAULT,
-            }).execute()
+            supabase.table("accounts").insert(
+                {
+                    "user_email": user_email,
+                    "runpod_token_encrypted": encrypted,
+                    "used_credits": 0.0,
+                    "limit_credits": FALLBACK_LIMIT_DEFAULT,
+                }
+            ).execute()
 
+        # ✔️ מחזירים יתרה אמיתית של המשתמש
         return JSONResponse({
             "status": "ok",
-            "balance": f"{float(bal):.6f}"
+            "balance": f"{float(balance):.6f}"
         })
 
     except Exception as e:
         print(f"❌ /save-token error: {e}")
-        return JSONResponse({"error": str(e)}, status_code=500})
-# ───────────────────────────────────────────────
-# 🧱 עדכון job_id (למקרה שהמשתמש התנתק לפני סיום התמלול)
+        return JSONResponse({"error": str(e)}, status_code=500)
+# ────────────────────────────────
+# בדיקת תמלול שהושלם אם המשתמש התנתק לפני קבלת התמלול
+# ────────────────────────────────
 @app.post("/db/transcriptions/update-job")
 async def update_job(request: Request):
     try:
@@ -578,13 +761,16 @@ async def update_job(request: Request):
         job_id = body.get("job_id")
 
         if not record_id or not job_id:
-            return JSONResponse({"error": "Missing record_id or job_id"}, status_code=400)
+            return JSONResponse(
+                {"error": "Missing record_id or job_id"},
+                status_code=400
+            )
 
         res = (
             supabase.table("transcriptions")
             .update({
                 "job_id": job_id,
-                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S")
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             })
             .eq("id", record_id)
             .execute()
@@ -594,4 +780,4 @@ async def update_job(request: Request):
 
     except Exception as e:
         print("❌ /db/transcriptions/update-job:", e)
-        return JSONResponse({"error": str(e)}, status_code=500})
+        return JSONResponse({"error": str(e)}, status_code=500)
