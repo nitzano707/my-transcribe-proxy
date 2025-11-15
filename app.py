@@ -401,20 +401,12 @@ async def transcribe(request: Request):
 @app.get("/status/{job_id}")
 def get_job_status(job_id: str, user_email: str | None = None):
     """
-    בודק את סטטוס המשימה ב-RunPod לפי מזהה job_id.
-
-    אם:
-    - יש user_email
-    - המשתמש עובד על fallback
-    - הסטטוס COMPLETED
-
-    אז:
-    - מחשבים עלות לפי executionTime
-    - מעדכנים used_credits
-    - מחזירים גם מידע על השימוש תחת המפתח _usage
+    בודק סטטוס מ-RunPod, מחייב (אם fallback), ושומר נתוני עיבוד במסד הנתונים.
     """
     try:
-        # אם אין user_email – לא נעדכן כלום בקרדיטים, רק נחזיר סטטוס
+        # ───────────────────────────────────────────
+        # 🔑 שליפת טוקן לשימוש
+        # ───────────────────────────────────────────
         if not user_email:
             token_to_use, _ = get_user_token(None)
         else:
@@ -423,6 +415,9 @@ def get_job_status(job_id: str, user_email: str | None = None):
         if not token_to_use:
             return JSONResponse({"error": "Missing token"}, status_code=401)
 
+        # ───────────────────────────────────────────
+        # 📡 שליפת סטטוס מ-RunPod
+        # ───────────────────────────────────────────
         r = requests.get(
             f"https://api.runpod.ai/v2/lco4rijwxicjyi/status/{job_id}",
             headers={"Authorization": f"Bearer {token_to_use}"},
@@ -433,28 +428,90 @@ def get_job_status(job_id: str, user_email: str | None = None):
 
         out = r.json() if r.content else {}
 
-        # 🧮 חיוב קרדיטים רק אם:
-        # - יש user_email
-        # - אנחנו ב-fallback
-        # - המשימה הושלמה
+        # ───────────────────────────────────────────
+        # 📘 עדכון קרדיטים למשתמש fallback
+        # ───────────────────────────────────────────
         if user_email and 'using_fallback' in locals() and using_fallback and out.get("status") == "COMPLETED":
             cost = estimate_cost_from_response(out)
             if cost > 0:
                 new_used = add_fallback_usage(user_email, cost)
                 remaining = max(FALLBACK_LIMIT_DEFAULT - new_used, 0.0)
-                print(
-                    f"💰 fallback user {user_email} used {cost:.8f}$ "
-                    f"(total {new_used:.6f}$, remaining {remaining:.6f}$)"
-                )
+
                 out["_usage"] = {
                     "estimated_cost_usd": cost,
                     "used_credits": new_used,
                     "remaining": remaining,
                 }
+
+                print(
+                    f"💰 fallback user {user_email} used {cost:.8f}$ "
+                    f"(total {new_used:.6f}$, remaining {remaining:.6f}$)"
+                )
             else:
                 print("⚖️ עלות לא אותרה או אפסית בתגובה של RunPod.")
 
+        # ───────────────────────────────────────────
+        # 🗄 עדכון רשומת התמלול במסד הנתונים
+        # ───────────────────────────────────────────
+        if out.get("status") == "COMPLETED":
+            # 1️⃣ שליפת מזהה הרשומה (record_id) לפי job_id
+            rec = (
+                supabase.table("transcriptions")
+                .select("id, audio_length_seconds")
+                .eq("job_id", job_id)
+                .maybe_single()
+                .execute()
+            )
+            record = rec.data if hasattr(rec, "data") else None
+
+            if record and record.get("id"):
+                record_id = record["id"]
+
+                # 2️⃣ קבלת executionTime
+                exec_ms = out.get("executionTime", 0)
+                exec_sec = float(exec_ms) / 1000.0
+
+                # 3️⃣ אורך האודיו — אם קיים בטבלה
+                audio_len = float(record.get("audio_length_seconds") or 0.0)
+
+                # (אופציונלי) אם יש מידע מתוך out["output"][0]["extra_data"]["duration"]
+                try:
+                    if not audio_len:
+                        out_list = out.get("output") or []
+                        if isinstance(out_list, list) and out_list:
+                            extra = out_list[0].get("extra_data") or {}
+                            audio_len = float(extra.get("duration") or 0.0)
+                except:
+                    pass
+
+                # 4️⃣ יחס עיבוד
+                ratio = exec_sec / audio_len if audio_len > 0 else None
+
+                # 5️⃣ חיוב לפי 0.00016
+                billing = exec_sec * 0.00016
+
+                # 6️⃣ זמן boot של Worker (אם תרצה)
+                delay_ms = out.get("delayTime", 0)
+                boot_sec = float(delay_ms) / 1000.0
+
+                # 7️⃣ עדכון במסד
+                updates = {
+                    "actual_processing_seconds": exec_sec,
+                    "billing_usd": billing,
+                    "processing_ratio": ratio,
+                    "worker_boot_time_seconds": boot_sec,
+                    "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }
+
+                supabase.table("transcriptions").update(updates).eq("id", record_id).execute()
+
+                print(f"🗄 נתוני תמלול עודכנו ב-DB עבור הרשומה {record_id}")
+
+        # ───────────────────────────────────────────
+        # החזרת תשובת RunPod כפי שהיא
+        # ───────────────────────────────────────────
         return JSONResponse(content=out, status_code=r.status_code)
+
     except Exception as e:
         print(f"❌ /status error: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
