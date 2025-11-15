@@ -673,6 +673,25 @@ async def update_transcription(request: Request):
 
 
 
+@app.get("/db/transcriptions/get")
+def get_transcription(id: str):
+    """
+    שולף רשומת תמלול בודדת לפי ID
+    """
+    try:
+        result = supabase.table("transcriptions").select("*").eq("id", id).maybe_single().execute()
+        
+        if result.data:
+            return JSONResponse(content=result.data, status_code=200)
+        else:
+            return JSONResponse({"error": "רשומה לא נמצאה"}, status_code=404)
+            
+    except Exception as e:
+        print(f"❌ /db/transcriptions/get: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+
 @app.post("/db/transcriptions/delete")
 async def delete_transcription(request: Request):
     try:
