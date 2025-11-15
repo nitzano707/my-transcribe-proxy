@@ -432,7 +432,8 @@ def get_job_status(job_id: str, user_email: str | None = None):
         # ───────────────────────────────────────────
         # 📘 עדכון קרדיטים למשתמש fallback
         # ───────────────────────────────────────────
-        if user_email and 'using_fallback' in locals() and using_fallback and out.get("status") == "COMPLETED":
+        if user_email and "using_fallback" in locals() and using_fallback and str(out.get("status", "")).lower() == "completed":
+
             cost = estimate_cost_from_response(out)
             if cost > 0:
                 new_used = add_fallback_usage(user_email, cost)
