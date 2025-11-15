@@ -472,19 +472,29 @@ def get_job_status(job_id: str, user_email: str | None = None):
                 exec_ms = out.get("executionTime", 0)
                 exec_sec = float(exec_ms) / 1000.0
 
-                # ⭐⭐ 3️⃣ שליפת אורך האודיו מתוך RunPod — Option A ⭐⭐
+                # ⭐⭐ 3️⃣ שליפת אורך האודיו מתוך RunPod ⭐⭐
                 audio_len = None
                 try:
                     outputs = out.get("output") or []
                     if isinstance(outputs, list) and len(outputs) > 0:
-                        # המקטע האחרון → משם duration אמיתי
+                        # המקטע האחרון → לוקחים את ה-end שהוא אורך הקובץ המלא
                         final_segment = outputs[0]["result"][-1][-1]
-                        
                         audio_len = float(final_segment.get("end", 0.0))
+                        print(f"📏 אורך אודיו מ-RunPod: {audio_len:.2f} שניות (מה-end של המקטע האחרון)")
                 except Exception as e:
-                    print("⚠️ לא ניתן לחלץ duration:", e)
+                    print("⚠️ לא ניתן לחלץ אורך אודיו מ-RunPod:", e)
 
-                # אם לא נמצא → נ fallback ל-0
+                # אם לא נמצא → נסה לשלוף מה-DB
+                if not audio_len or audio_len == 0:
+                    try:
+                        db_record = supabase.table("transcriptions").select("audio_length_seconds").eq("id", record_id).maybe_single().execute()
+                        if db_record.data and db_record.data.get("audio_length_seconds"):
+                            audio_len = float(db_record.data["audio_length_seconds"])
+                            print(f"📏 אורך אודיו מ-DB: {audio_len:.2f} שניות")
+                    except Exception as e:
+                        print("⚠️ לא ניתן לשלוף אורך מה-DB:", e)
+                
+                # אם עדיין לא נמצא → fallback ל-0
                 audio_len = audio_len or 0.0
 
                 # ⭐⭐ 4️⃣ יחס עיבוד ⭐⭐
