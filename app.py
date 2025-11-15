@@ -427,6 +427,8 @@ def get_job_status(job_id: str, user_email: str | None = None):
             return JSONResponse({"error": "שגיאה בשליפת סטטוס מ-RunPod"}, status_code=r.status_code)
 
         out = r.json() if r.content else {}
+        print("🔍 RAW RunPod response:", out)
+
 
         # ───────────────────────────────────────────
         # 📘 עדכון קרדיטים למשתמש fallback
