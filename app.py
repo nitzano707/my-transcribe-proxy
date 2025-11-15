@@ -633,12 +633,44 @@ async def update_transcription(request: Request):
         body = await request.json()
         id = body.get("id")
         updates = body.get("updates", {})
+
+        # 🕒 תמיד מעדכן זמן
         updates["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+
+        # 🎵 שמירת אורך האודיו (אם קיים)
+        if "audio_length_seconds" in updates:
+            try:
+                updates["audio_length_seconds"] = float(updates["audio_length_seconds"])
+            except:
+                pass
+
+        # ⏱️ שמירת זמן עיבוד משוער (אם קיים)
+        if "estimated_processing_seconds" in updates:
+            try:
+                updates["estimated_processing_seconds"] = float(updates["estimated_processing_seconds"])
+            except:
+                pass
+
+        # 🧾 שמירת גודל קובץ (אם קיים)
+        if "file_size_bytes" in updates:
+            try:
+                updates["file_size_bytes"] = int(updates["file_size_bytes"])
+            except:
+                pass
+
+        # 🆔 שמירת job_id (אם קיים)
+        if "job_id" in updates:
+            updates["job_id"] = updates["job_id"]
+
+        # 💾 עידכון DB
         res = supabase.table("transcriptions").update(updates).eq("id", id).execute()
+
         return JSONResponse({"status": "ok", "data": res.data})
+
     except Exception as e:
         print("❌ /db/transcriptions/update:", e)
         return JSONResponse({"error": str(e)}, status_code=500)
+
 
 
 @app.post("/db/transcriptions/delete")
