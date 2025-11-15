@@ -27,7 +27,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")      # חובה לטוקנים אישיים
 RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY")      # טוקן fallback גלובלי
-FALLBACK_LIMIT_DEFAULT = float(os.getenv("FALLBACK_LIMIT_DEFAULT", "0.5"))
+FALLBACK_LIMIT_DEFAULT = float(os.getenv("FALLBACK_LIMIT_DEFAULT", "0.1"))
 RUNPOD_RATE_PER_SEC = float(os.getenv("RUNPOD_RATE_PER_SEC", "0.0002"))
 
 UPLOAD_DIR = "uploads"
@@ -429,7 +429,6 @@ def get_job_status(job_id: str, user_email: str | None = None):
         out = r.json() if r.content else {}
         print("🔍 RAW RunPod response:", out)
 
-
         # ───────────────────────────────────────────
         # 📘 עדכון קרדיטים למשתמש fallback
         # ───────────────────────────────────────────
@@ -459,7 +458,7 @@ def get_job_status(job_id: str, user_email: str | None = None):
             # 1️⃣ שליפת מזהה הרשומה (record_id) לפי job_id
             rec = (
                 supabase.table("transcriptions")
-                .select("id, audio_length_seconds")
+                .select("id")
                 .eq("job_id", job_id)
                 .maybe_single()
                 .execute()
@@ -469,35 +468,41 @@ def get_job_status(job_id: str, user_email: str | None = None):
             if record and record.get("id"):
                 record_id = record["id"]
 
-                # 2️⃣ קבלת executionTime
+                # 2️⃣ זמן עיבוד בפועל
                 exec_ms = out.get("executionTime", 0)
                 exec_sec = float(exec_ms) / 1000.0
 
-                # 3️⃣ אורך האודיו — אם קיים בטבלה
-                audio_len = float(record.get("audio_length_seconds") or 0.0)
-
-                # (אופציונלי) אם יש מידע מתוך out["output"][0]["extra_data"]["duration"]
+                # ⭐⭐ 3️⃣ שליפת אורך האודיו מתוך RunPod — Option A ⭐⭐
+                audio_len = None
                 try:
-                    if not audio_len:
-                        out_list = out.get("output") or []
-                        if isinstance(out_list, list) and out_list:
-                            extra = out_list[0].get("extra_data") or {}
-                            audio_len = float(extra.get("duration") or 0.0)
-                except:
-                    pass
+                    outputs = out.get("output") or []
+                    if isinstance(outputs, list) and len(outputs) > 0:
+                        # המקטע האחרון → משם duration אמיתי
+                        final_segment = outputs[0]["result"][-1][-1]
+                        audio_len = float(final_segment["extra_data"].get("duration", 0.0))
+                except Exception as e:
+                    print("⚠️ לא ניתן לחלץ duration:", e)
 
-                # 4️⃣ יחס עיבוד
+                # אם לא נמצא → נ fallback ל-0
+                audio_len = audio_len or 0.0
+
+                # ⭐⭐ 4️⃣ יחס עיבוד ⭐⭐
                 ratio = exec_sec / audio_len if audio_len > 0 else None
 
-                # 5️⃣ חיוב לפי 0.00016
+                # ⭐⭐ 5️⃣ חיוב ⭐⭐
                 billing = exec_sec * 0.00016
 
-                # 6️⃣ זמן boot של Worker (אם תרצה)
+                # ⭐⭐ 6️⃣ זמן boot של ה-Worker ⭐⭐
                 delay_ms = out.get("delayTime", 0)
                 boot_sec = float(delay_ms) / 1000.0
 
-                # 7️⃣ עדכון במסד
+                # ⭐⭐ 7️⃣ זמן עיבוד משוער (8%) ⭐⭐
+                estimated = audio_len * 0.08 if audio_len > 0 else None
+
+                # ⭐⭐ 8️⃣ עדכון במסד ⭐⭐
                 updates = {
+                    "audio_length_seconds": audio_len,
+                    "estimated_processing_seconds": estimated,
                     "actual_processing_seconds": exec_sec,
                     "billing_usd": billing,
                     "processing_ratio": ratio,
@@ -517,6 +522,7 @@ def get_job_status(job_id: str, user_email: str | None = None):
     except Exception as e:
         print(f"❌ /status error: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
+
 
 
 # ───────────────────────────────────────────────
