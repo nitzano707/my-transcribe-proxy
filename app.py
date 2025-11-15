@@ -413,14 +413,34 @@ def get_job_status(job_id: str, user_email: str | None = None):
         # ───────────────────────────────────────────
         if status_lower == "completed":
             # 1️⃣ שליפת מזהה הרשומה (record_id) לפי job_id
+            # שליפת כל הרשומות הקשורות לקובץ
             rec = (
                 supabase.table("transcriptions")
-                .select("id")
+                .select("id, audio_id, alias")
                 .eq("job_id", job_id)
                 .maybe_single()
                 .execute()
             )
+            
             record = rec.data if hasattr(rec, "data") else None
+            
+            if record:
+                audio_id = record.get("audio_id")
+                
+                # שלוף את כל המופעים של אותו קובץ
+                all_records = (
+                    supabase.table("transcriptions")
+                    .select("id")
+                    .eq("audio_id", audio_id)
+                    .execute()
+                )
+            
+                ids = [row["id"] for row in all_records.data]
+            
+                # עדכון על כל הרשומות
+                for rid in ids:
+                    supabase.table("transcriptions").update(updates).eq("id", rid).execute()
+
 
             if record and record.get("id"):
                 record_id = record["id"]
