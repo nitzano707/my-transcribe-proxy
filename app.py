@@ -649,3 +649,30 @@ async def save_token(request: Request):
     except Exception as e:
         print(f"❌ /save-token error: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
+
+# ────────────────────────────────בדיקת תמלול שהושלם אם המשתמש התנתק לפני קבלת התמלול
+
+@app.post("/db/transcriptions/update-job")
+async def update_job(request: Request):
+    try:
+        body = await request.json()
+        record_id = body.get("record_id")
+        job_id = body.get("job_id")
+
+        if not record_id or not job_id:
+            return JSONResponse({"error": "Missing record_id or job_id"}, status_code=400)
+
+        res = (
+            supabase.table("transcriptions")
+            .update({
+                "job_id": job_id,
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S")
+            })
+            .eq("id", record_id)
+            .execute()
+        )
+        return JSONResponse({"status": "ok", "data": res.data})
+
+    except Exception as e:
+        print("❌ /db/transcriptions/update-job:", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
