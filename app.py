@@ -414,6 +414,20 @@ def get_job_status(job_id: str, user_email: str | None = None):
         # ───────────────────────────────────────────
         if status_lower == "completed":
 
+            # 🔵 NEW — אל תעדכן אם ה-output עדיין לא מלא
+            outputs = out.get("output") or []
+            if not outputs or not isinstance(outputs, list) or len(outputs) == 0:
+                print("⏳ COMPLETED התקבל אבל output עדיין לא מוכן — מדלג על עדכון DB.")
+                return JSONResponse(content=out, status_code=r.status_code)
+
+            try:
+                _ = outputs[0]["result"][-1][-1]
+            except:
+                print("⏳ output במבנה חלקי — מדלג על עדכון DB.")
+                return JSONResponse(content=out, status_code=r.status_code)
+            # 🔵 END NEW
+
+
             # 1️⃣ שליפת רשומה לפי job_id כדי להשיג את ה-audio_id
             rec = (
                 supabase.table("transcriptions")
@@ -434,15 +448,12 @@ def get_job_status(job_id: str, user_email: str | None = None):
                 # ⭐⭐ 3️⃣ שליפת אורך האודיו ⭐⭐
                 audio_len = None
                 try:
-                    outputs = out.get("output") or []
-                    if isinstance(outputs, list) and len(outputs) > 0:
-                        final_segment = outputs[0]["result"][-1][-1]
-                        audio_len = float(final_segment.get("end", 0.0))
-                        print(f"📏 אורך אודיו מ-RunPod: {audio_len:.2f} שניות")
+                    final_segment = outputs[0]["result"][-1][-1]
+                    audio_len = float(final_segment.get("end", 0.0))
+                    print(f"📏 אורך אודיו מ-RunPod: {audio_len:.2f} שניות")
                 except Exception as e:
                     print("⚠️ לא ניתן לחלץ אורך אודיו מ-RunPod:", e)
 
-                # ⭐ אם לא זוהה, ננסה למשוך מאחת הרשומות הקיימות
                 if not audio_len or audio_len == 0:
                     try:
                         db_record = (
@@ -496,6 +507,7 @@ def get_job_status(job_id: str, user_email: str | None = None):
     except Exception as e:
         print(f"❌ /status error: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
+
 
 # ───────────────────────────────────────────────
 @app.get("/effective-balance")
