@@ -479,7 +479,8 @@ def get_job_status(job_id: str, user_email: str | None = None):
                     if isinstance(outputs, list) and len(outputs) > 0:
                         # המקטע האחרון → משם duration אמיתי
                         final_segment = outputs[0]["result"][-1][-1]
-                        audio_len = float(final_segment["extra_data"].get("duration", 0.0))
+                        
+                        audio_len = float(final_segment.get("end", 0.0))
                 except Exception as e:
                     print("⚠️ לא ניתן לחלץ duration:", e)
 
