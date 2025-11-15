@@ -453,7 +453,7 @@ def get_job_status(job_id: str, user_email: str | None = None):
         # ───────────────────────────────────────────
         # 🗄 עדכון רשומת התמלול במסד הנתונים
         # ───────────────────────────────────────────
-        if out.get("status") == "COMPLETED":
+        if str(out.get("status", "")).lower() == "completed":
             # 1️⃣ שליפת מזהה הרשומה (record_id) לפי job_id
             rec = (
                 supabase.table("transcriptions")
