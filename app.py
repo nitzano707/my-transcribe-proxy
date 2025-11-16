@@ -348,11 +348,14 @@ async def transcribe(request: Request):
         print(f"❌ /transcribe error: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
 # ───────────────────────────────────────────────
+# ────────────────────────────────
+#   בדיקת סטטוס + עדכון DB מלא
+# ────────────────────────────────
 @app.get("/status/{job_id}")
 def get_job_status(job_id: str, user_email: str | None = None):
     """
-    בודק סטטוס מ-RunPod, מחייב (אם fallback), ושומר נתוני עיבוד במסד הנתונים.
-    מעודכן לעדכון כל הרשומות שיש להן אותו audio_id.
+    בודק סטטוס מ-RunPod, מחייב (fallback), שומר job_id תמיד,
+    ומעדכן נתוני עיבוד לכל הרשומות של אותו audio_id.
     """
     try:
         # ───────────────────────────────────────────
@@ -375,15 +378,50 @@ def get_job_status(job_id: str, user_email: str | None = None):
             timeout=30,
         )
         if not r.ok:
-            return JSONResponse({"error": "שגיאה בשליפת סטטוס מ-RunPod"}, status_code=r.status_code)
+            return JSONResponse(
+                {"error": "שגיאה בשליפת סטטוס מ-RunPod"},
+                status_code=r.status_code
+            )
 
         out = r.json() if r.content else {}
         print("🔍 RAW RunPod response:", out)
 
         status_lower = str(out.get("status", "")).lower()
+        outputs = out.get("output") or []
 
         # ───────────────────────────────────────────
-        # 📘 עדכון קרדיטים למשתמש fallback
+        # ⭐ שמירת job_id תמיד ב-DB (גם אם Completed)
+        # ───────────────────────────────────────────
+        try:
+            # אם יש רשומה מתאימה – לעדכן
+            rec = (
+                supabase.table("transcriptions")
+                .select("audio_id")
+                .eq("job_id", job_id)
+                .maybe_single()
+                .execute()
+            )
+
+            audio_id_from_job = (
+                rec.data["audio_id"]
+                if hasattr(rec, "data") and rec.data else None
+            )
+
+            # אם לא מצא – לא נכשלים
+            if audio_id_from_job:
+                supabase.table("transcriptions").update(
+                    {
+                        "job_id": job_id,
+                        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    }
+                ).eq("audio_id", audio_id_from_job).execute()
+
+                print(f"🔥 [SERVER] job_id נשמר: {job_id}")
+        except Exception as e:
+            print("⚠️ לא הצלחנו לעדכן job_id:", e)
+
+        # ───────────────────────────────────────────
+        # 💰 חיוב fallback
         # ───────────────────────────────────────────
         if (
             user_email
@@ -407,16 +445,13 @@ def get_job_status(job_id: str, user_email: str | None = None):
                     f"(total {new_used:.6f}$, remaining {remaining:.6f}$)"
                 )
             else:
-                print("⚖️ עלות לא אותרה או אפסית בתגובה של RunPod.")
+                print("⚖️ עלות לא אותרה.")
 
         # ───────────────────────────────────────────
-        # 🗄 עדכון רשומת התמלול במסד הנתונים
+        # 🗄 עדכון נתוני ביצועים במסד
         # ───────────────────────────────────────────
         if status_lower == "completed":
-
-           
-
-            # 1️⃣ שליפת רשומה לפי job_id כדי להשיג את ה-audio_id
+            # שליפת רשומה לפי job_id
             rec = (
                 supabase.table("transcriptions")
                 .select("audio_id")
@@ -433,46 +468,45 @@ def get_job_status(job_id: str, user_email: str | None = None):
                 exec_ms = out.get("executionTime", 0)
                 exec_sec = float(exec_ms) / 1000.0
 
-                # ⭐⭐ 3️⃣ שליפת אורך האודיו ⭐⭐
+                # 3️⃣ אורך האודיו מתוך הפלט
                 audio_len = None
                 try:
-                    final_segment = outputs[0]["result"][-1][-1]
-                    audio_len = float(final_segment.get("end", 0.0))
-                    print(f"📏 אורך אודיו מ-RunPod: {audio_len:.2f} שניות")
+                    if outputs and outputs[0]["result"]:
+                        last = outputs[0]["result"][-1][-1]
+                        audio_len = float(last.get("end", 0.0))
+                        print(f"📏 אורך אודיו מ-RunPod: {audio_len}")
                 except Exception as e:
-                    print("⚠️ לא ניתן לחלץ אורך אודיו מ-RunPod:", e)
+                    print("⚠️ שגיאה בחילוץ אורך אודיו:", e)
 
+                # אם עדיין לא קיים — נשלוף מה-DB
                 if not audio_len or audio_len == 0:
                     try:
-                        db_record = (
+                        dbrec = (
                             supabase.table("transcriptions")
                             .select("audio_length_seconds")
                             .eq("audio_id", audio_id)
                             .maybe_single()
                             .execute()
                         )
-                        if db_record.data and db_record.data.get("audio_length_seconds"):
-                            audio_len = float(db_record.data["audio_length_seconds"])
-                            print(f"📏 אורך אודיו מ-DB: {audio_len:.2f} שניות")
+                        if (
+                            hasattr(dbrec, "data")
+                            and dbrec.data
+                            and dbrec.data.get("audio_length_seconds")
+                        ):
+                            audio_len = float(dbrec.data["audio_length_seconds"])
+                            print(f"📏 אורך אודיו מה-DB: {audio_len}")
                     except:
                         pass
 
                 audio_len = audio_len or 0.0
 
-                # ⭐⭐ 4️⃣ יחס עיבוד ⭐⭐
+                # חישובים
                 ratio = exec_sec / audio_len if audio_len > 0 else None
-
-                # ⭐⭐ 5️⃣ חיוב ⭐⭐
                 billing = exec_sec * 0.00016
-
-                # ⭐⭐ 6️⃣ זמן boot ⭐⭐
-                delay_ms = out.get("delayTime", 0)
-                boot_sec = float(delay_ms) / 1000.0
-
-                # ⭐⭐ 7️⃣ הערכת זמן ⭐⭐
+                boot_sec = float(out.get("delayTime", 0)) / 1000.0
                 estimated = audio_len * 0.08 if audio_len > 0 else None
 
-                # ⭐⭐ 8️⃣ עדכון כל הרשומות של אותו קובץ ⭐⭐
+                # עדכון כל הרשומות המתאימות
                 updates = {
                     "audio_length_seconds": audio_len,
                     "estimated_processing_seconds": estimated,
@@ -483,12 +517,14 @@ def get_job_status(job_id: str, user_email: str | None = None):
                     "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 }
 
-                supabase.table("transcriptions").update(updates).eq("audio_id", audio_id).execute()
+                supabase.table("transcriptions").update(updates).eq(
+                    "audio_id", audio_id
+                ).execute()
 
-                print(f"🗄 כל הרשומות עם audio_id={audio_id} עודכנו בהצלחה.")
+                print(f"🗄 עודכנו נתוני ביצועים ל־audio_id={audio_id}")
 
         # ───────────────────────────────────────────
-        # החזרת תשובת RunPod כפי שהיא
+        # החזרת פלט RunPod
         # ───────────────────────────────────────────
         return JSONResponse(content=out, status_code=r.status_code)
 
