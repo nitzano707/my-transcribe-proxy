@@ -414,19 +414,7 @@ def get_job_status(job_id: str, user_email: str | None = None):
         # ───────────────────────────────────────────
         if status_lower == "completed":
 
-            # 🔵 NEW — אל תעדכן אם ה-output עדיין לא מלא
-            outputs = out.get("output") or []
-            if not outputs or not isinstance(outputs, list) or len(outputs) == 0:
-                print("⏳ COMPLETED התקבל אבל output עדיין לא מוכן — מדלג על עדכון DB.")
-                return JSONResponse(content=out, status_code=r.status_code)
-
-            try:
-                _ = outputs[0]["result"][-1][-1]
-            except:
-                print("⏳ output במבנה חלקי — מדלג על עדכון DB.")
-                return JSONResponse(content=out, status_code=r.status_code)
-            # 🔵 END NEW
-
+           
 
             # 1️⃣ שליפת רשומה לפי job_id כדי להשיג את ה-audio_id
             rec = (
